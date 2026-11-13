@@ -19,3 +19,10 @@ __pycache__/
 # See docs/DECISIONS.md -> "换机与续聊恢复".
 .workbuddy/memory/
 .workbuddy/tmp/
+
+# Bundled engine runtime: third-party binaries, ~749 MB. Never in Git (see D023).
+engine/node/
+engine/openclaw/
+
+# Electron packaging output
+release/

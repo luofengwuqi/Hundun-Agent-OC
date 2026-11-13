@@ -1,0 +1,228 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; script-src 'self'; style-src 'unsafe-inline' 'self'; img-src 'self' data:;"
+    />
+    <title>馄饨Agent-OC</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg: #12100e;
+        --panel: #1b1815;
+        --panel-2: #221e1a;
+        --line: #2f2924;
+        --text: #ece5dc;
+        --muted: #9c9186;
+        --ok: #7fb069;
+        --warn: #d9a441;
+        --bad: #c96b5a;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      html,
+      body {
+        height: 100%;
+        margin: 0;
+      }
+      body {
+        background: var(--bg);
+        color: var(--text);
+        font:
+          14px/1.6 -apple-system,
+          "Segoe UI",
+          "PingFang SC",
+          "Microsoft YaHei",
+          sans-serif;
+        display: flex;
+        flex-direction: column;
+      }
+      header {
+        padding: 22px 28px 14px;
+        border-bottom: 1px solid var(--line);
+      }
+      h1 {
+        margin: 0;
+        font-size: 17px;
+        font-weight: 600;
+        letter-spacing: 0.3px;
+      }
+      header p {
+        margin: 6px 0 0;
+        color: var(--muted);
+        font-size: 13px;
+      }
+      main {
+        flex: 1;
+        overflow: auto;
+        padding: 20px 28px 28px;
+        display: flex;
+        flex-direction: column;
+        gap: 16px;
+      }
+      .card {
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        padding: 16px 18px;
+      }
+      .row {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        flex-wrap: wrap;
+      }
+      .dot {
+        width: 9px;
+        height: 9px;
+        border-radius: 50%;
+        background: var(--muted);
+        flex: none;
+      }
+      .dot.ready {
+        background: var(--ok);
+      }
+      .dot.starting {
+        background: var(--warn);
+        animation: pulse 1.4s ease-in-out infinite;
+      }
+      .dot.failed {
+        background: var(--bad);
+      }
+      @keyframes pulse {
+        50% {
+          opacity: 0.3;
+        }
+      }
+      .status-text {
+        font-weight: 600;
+      }
+      .meta {
+        color: var(--muted);
+        font-size: 12.5px;
+        margin-top: 8px;
+        word-break: break-all;
+      }
+      .notice {
+        margin-top: 10px;
+        padding: 10px 12px;
+        border-left: 3px solid var(--warn);
+        background: var(--panel-2);
+        border-radius: 0 8px 8px 0;
+        font-size: 13px;
+        white-space: pre-wrap;
+      }
+      .failure {
+        border-left-color: var(--bad);
+      }
+      button {
+        font: inherit;
+        color: var(--text);
+        background: var(--panel-2);
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        padding: 7px 14px;
+        cursor: pointer;
+      }
+      button:hover {
+        border-color: #443b34;
+        background: #262119;
+      }
+      button:disabled {
+        opacity: 0.45;
+        cursor: default;
+      }
+      .hint {
+        color: var(--muted);
+        font-size: 12.5px;
+        margin: 0;
+      }
+      pre {
+        margin: 10px 0 0;
+        max-height: 240px;
+        overflow: auto;
+        background: #0d0b0a;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        padding: 12px;
+        font:
+          12px/1.55 "SFMono-Regular",
+          Consolas,
+          monospace;
+        color: #b9ada1;
+        white-space: pre-wrap;
+      }
+      .toast {
+        position: fixed;
+        left: 50%;
+        bottom: 22px;
+        transform: translateX(-50%);
+        background: #2b241d;
+        border: 1px solid var(--line);
+        padding: 8px 16px;
+        border-radius: 999px;
+        font-size: 13px;
+        opacity: 0;
+        transition: opacity 0.25s ease;
+        pointer-events: none;
+      }
+      .toast.show {
+        opacity: 1;
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>馄饨Agent-OC</h1>
+      <p>先接住情绪，再谈事情。</p>
+    </header>
+
+    <main>
+      <section class="card">
+        <div class="row">
+          <span class="dot" id="dot"></span>
+          <span class="status-text" id="status-text">正在启动…</span>
+          <span style="flex: 1"></span>
+          <button id="btn-restart">重启引擎</button>
+        </div>
+        <div class="meta" id="meta"></div>
+        <div id="notice-wrap"></div>
+      </section>
+
+      <section class="card">
+        <div class="row">
+          <strong style="font-size: 13.5px">陪伴数据</strong>
+          <span style="flex: 1"></span>
+          <button id="btn-workspace">打开记忆目录</button>
+          <button id="btn-datadir">打开数据目录</button>
+        </div>
+        <p class="hint" style="margin-top: 10px">
+          记忆、人格与配置都保存在本机这个目录里，不随卸载删除。换机器时把它一起带走。
+        </p>
+      </section>
+
+      <section class="card">
+        <strong style="font-size: 13.5px">对话还没接上</strong>
+        <p class="hint" style="margin-top: 8px">
+          这一版只做好了引擎的启动、就绪与收尾。对话收发要等 OpenAI 兼容接口的配置键核实后再接——
+          写错一个键会让引擎以「配置无效」退出，比不做更糟。
+        </p>
+      </section>
+
+      <section class="card">
+        <div class="row">
+          <strong style="font-size: 13.5px">引擎日志</strong>
+          <span style="flex: 1"></span>
+          <span class="hint" id="log-count"></span>
+        </div>
+        <pre id="logs">（等待引擎输出）</pre>
+      </section>
+    </main>
+
+    <div class="toast" id="toast"></div>
+    <script src="./app.js"></script>
+  </body>
+</html>
