@@ -1,0 +1,21 @@
+# Local config and secrets. Never commit real values.
+.env.local
+.env.*.local
+
+# Dependencies and build output
+node_modules/
+.next/
+dist/
+build/
+target/
+__pycache__/
+.venv/
+*.log
+
+# Local data, uploads and evidence
+.local/
+
+# AI local memory: NOT in Git, carry it over manually when switching machines.
+# See docs/DECISIONS.md -> "换机与续聊恢复".
+.workbuddy/memory/
+.workbuddy/tmp/
