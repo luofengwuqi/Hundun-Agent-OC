@@ -236,3 +236,86 @@ export async function readModelRef(configPath: string): Promise<string | undefin
   const primary = model.primary;
   return typeof primary === "string" && primary.length > 0 ? primary : undefined;
 }
+
+/**
+ * 读回引擎配置里已保存的 provider 集，反推成 opencode 式的预览形状（D028）。
+ *
+ * 用途：设置页重启后，编辑器是空的，但引擎里已经配好了模型——卡片链必须显示这些，
+ * 否则用户会以为「配好的模型丢了」。这里把引擎格式翻译回界面认识的 provider/chain 形状。
+ */
+export async function readSavedProviders(configPath: string): Promise<{
+  providers: Array<{ id: string; name: string; baseUrl: string; hasKey: boolean; models: Array<{ id: string; name: string; context: number }> }>;
+  primaryRef: string | null;
+}> {
+  const { json } = await readJsonIfPresent(configPath);
+  const models = json?.models;
+  const providers: Array<{ id: string; name: string; baseUrl: string; hasKey: boolean; models: Array<{ id: string; name: string; context: number }> }> = [];
+  if (isObject(models)) {
+    const provNode = models.providers;
+    if (isObject(provNode)) {
+      for (const [id, confRaw] of Object.entries(provNode)) {
+        const conf = isObject(confRaw) ? confRaw : {};
+        const baseUrl = typeof conf.baseUrl === "string" ? conf.baseUrl : "";
+        const modelList = Array.isArray(conf.models)
+          ? (conf.models as Array<Record<string, unknown>>)
+          : [];
+        providers.push({
+          id,
+          name: typeof conf.name === "string" && conf.name ? conf.name : id,
+          baseUrl,
+          hasKey: typeof conf.apiKey === "string" && conf.apiKey.length > 0,
+          models: modelList.map((m) => ({
+            id: typeof m.id === "string" ? m.id : "",
+            name: typeof m.name === "string" && m.name ? m.name : (typeof m.id === "string" ? m.id : ""),
+            context: Number((m as Record<string, unknown>).context) > 0 ? Math.floor(Number((m as Record<string, unknown>).context)) : 0,
+          })),
+        });
+      }
+    }
+  }
+  return { providers, primaryRef: (await readModelRef(configPath)) ?? null };
+}
+
+/**
+ * 把翻译好的多 provider + 首选模型合并进 openclaw.json（D028）。
+ *
+ * 与 ensureModelProvider 的区别：那个只写**一个** provider；这里把整份导入结果
+ * （多个 provider + 链的首选）一次性写入。写入前先备份，幂等（内容没变就不动）。
+ *
+ * 引擎配置里只写 ${ENV} 插值，明文密钥不进来（在 secrets.json）。
+ */
+export async function writeModelProviders(
+  configPath: string,
+  providers: Record<string, unknown>,
+  primaryRef: string | null,
+): Promise<{ changed: boolean }> {
+  const { json } = await readJsonIfPresent(configPath);
+  if (!json) throw new Error("配置文件不存在，先确保 ensureConfigFile 跑过");
+
+  const next: Json = { ...json };
+
+  const models = isObject(next.models) ? { ...next.models } : {};
+  models.mode = models.mode ?? "merge";
+  // 导入是「整份替换」用户当前的模型 provider 集，还是「合并」？
+  // 这里选替换：用户导入一份新配置，意图就是「用这份」，不是「和旧的拼一起」。
+  models.providers = providers;
+  next.models = models;
+
+  if (primaryRef) {
+    const agents = isObject(next.agents) ? { ...next.agents } : {};
+    const defaults = isObject(agents.defaults) ? { ...agents.defaults } : {};
+    const model = isObject(defaults.model) ? { ...defaults.model } : {};
+    model.primary = primaryRef;
+    defaults.model = model;
+    agents.defaults = defaults;
+    next.agents = agents;
+  }
+
+  if (JSON.stringify(next) === JSON.stringify(json)) return { changed: false };
+
+  const backup = `${configPath}.bak-${Date.now()}`;
+  await copyFile(configPath, backup);
+  await writeFile(configPath, `${JSON.stringify(next, null, 2)}\n`, { mode: 0o600 });
+  await chmod(configPath, 0o600);
+  return { changed: true };
+}

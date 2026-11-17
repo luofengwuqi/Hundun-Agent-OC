@@ -55,6 +55,26 @@ export async function writeSecret(
   return next;
 }
 
+/**
+ * 批量写入（导入一份配置可能带来多个 provider 的 key）。
+ * 空值跳过、非空覆盖；不会清掉没提到的键——导入不该抹掉用户手动加的别的 key。
+ */
+export async function writeSecrets(
+  dataDir: string,
+  incoming: Readonly<Record<string, string>>,
+): Promise<Record<string, string>> {
+  const current = await readSecrets(dataDir);
+  const next = { ...current };
+  for (const [name, value] of Object.entries(incoming)) {
+    if (!ENV_NAME.test(name)) continue;
+    if (typeof value === "string" && value.trim().length > 0) next[name] = value.trim();
+  }
+  const path = secretsPath(dataDir);
+  await writeFile(path, `${JSON.stringify(next, null, 2)}\n`, { mode: 0o600 });
+  await chmod(path, 0o600);
+  return next;
+}
+
 /** 哪些变量名算「已配置凭据」。用于界面上判断要不要提示去填 key。 */
 export function hasAnySecret(secrets: Record<string, string>, names: readonly string[]): boolean {
   return names.some((name) => typeof secrets[name] === "string" && secrets[name].length > 0);
