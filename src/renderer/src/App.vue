@@ -220,25 +220,135 @@ function stop() {
   window.shellApi.abortChat()
 }
 
-const keyInput = ref('')
-const savingKey = ref(false)
+/* ── 模型配置（D028）──
+ * 一份 opencode 式 JSON 是唯一源：导入/手写 → 预览 → 应用。
+ * 卡片从上到下就是尝试顺序，排第一的先用。
+ */
+const modelText = ref('')
+const modelPreview = ref(null) // { ok, errors, warnings, providers, selected, chain }
+const showJson = ref(false)
+const applying = ref(false)
+const applyMsg = ref('')
+const applyKind = ref('')
 
-async function saveKey() {
-  if (savingKey.value) return
-  const key = keyInput.value.trim()
-  if (key.length === 0) {
-    flash('先填一个 Key')
+function runPreview() {
+  if (!modelText.value.trim()) {
+    modelPreview.value = null
     return
   }
-  savingKey.value = true
+  window.shellApi.previewModel(modelText.value).then((r) => (modelPreview.value = r))
+}
+
+const chain = computed(() => modelPreview.value?.chain || [])
+const candidates = computed(() => {
+  const used = new Set(chain.value.map((m) => m.providerId + '/' + m.modelId))
+  const out = []
+  for (const p of modelPreview.value?.providers || []) {
+    const rest = p.models.filter((m) => !used.has(p.id + '/' + m.id))
+    if (rest.length) out.push({ id: p.id, name: p.name, models: rest })
+  }
+  return out
+})
+const refOf = (m) => m.providerId + '/' + m.modelId
+const fmtCtx = (n) => (n >= 1000 ? Math.round(n / 1000) + 'k' : String(n))
+
+async function editChain(op, ref, extra = {}) {
+  let obj
   try {
-    applyState(await window.shellApi.setModelKey(key))
-    keyInput.value = ''
-    flash('已保存，引擎正在用新钥匙重启')
-  } catch (error) {
-    flash('保存失败：' + (error?.message || error))
-  } finally {
-    savingKey.value = false
+    obj = JSON.parse(modelText.value)
+  } catch {
+    applyMsg.value = 'JSON 有语法错误，先把「手写 JSON」里的改对'
+    applyKind.value = 'bad'
+    return
+  }
+  const r = await window.shellApi.editModel({ config: obj, op, ref, ...extra })
+  if (!r.ok) {
+    applyMsg.value = r.error || '改不动'
+    applyKind.value = 'bad'
+    return
+  }
+  modelText.value = JSON.stringify(r.config, null, 2)
+  runPreview()
+  if (modelPreview.value?.ok) await applyModel(true)
+}
+
+const setHead = (m) => editChain('move', refOf(m), { to: 0 })
+const moveUp = (m, i) => editChain('move', refOf(m), { to: i - 1 })
+const moveDown = (m, i) => editChain('move', refOf(m), { to: i + 1 })
+const drop = (m) => editChain('remove', refOf(m))
+const addOne = (p, m) => editChain('add', p.id + '/' + m.id)
+
+async function importFile() {
+  const r = await window.shellApi.pickModelFile()
+  if (!r || r.canceled) return
+  if (!r.ok) {
+    applyMsg.value = r.error || '读不了'
+    applyKind.value = 'bad'
+    return
+  }
+  modelText.value = r.text
+  showJson.value = true
+  applyMsg.value = ''
+  applyKind.value = ''
+  runPreview()
+}
+
+function formatJson() {
+  try {
+    modelText.value = JSON.stringify(JSON.parse(modelText.value), null, 2)
+  } catch (e) {
+    applyMsg.value = 'JSON 语法错误：' + e.message
+    applyKind.value = 'bad'
+  }
+}
+
+async function applyModel(silent = false) {
+  applying.value = true
+  if (!silent) {
+    applyMsg.value = ''
+    applyKind.value = ''
+  }
+  const r = await window.shellApi.applyModel(modelText.value)
+  applying.value = false
+  if (!r.ok) {
+    applyMsg.value = (r.errors || ['应用失败']).join('；')
+    applyKind.value = 'bad'
+    return
+  }
+  if (r.cfg) applyState(r.cfg)
+  const n = (r.warnings || []).length
+  if (!silent) {
+    applyMsg.value = n ? `已应用，有 ${n} 条提醒` : '已应用'
+    applyKind.value = n ? 'warn' : 'ok'
+  }
+}
+
+/**
+ * 反向加载：引擎里已经配好的模型，重启后编辑器是空的，卡片链会丢。
+ * 这里把引擎的 models.providers 反推成一份等价的 opencode JSON 填回编辑器，
+ * 卡片链就能正常显示。密钥用 ${env:OPENCLAW_<ID>_API_KEY} 占位符（不碰明文），
+ * 反正 apply 时这两个来源是幂等的。
+ */
+async function loadSavedModel() {
+  try {
+    const r = await window.shellApi.currentModel()
+    if (!r || !r.ok || !r.providers || !r.providers.length) return
+    const provider = {}
+    const order = []
+    for (const p of r.providers) {
+      const models = {}
+      for (const m of p.models) models[m.id] = { name: m.name, limit: { context: m.context || 0 } }
+      const options = { baseURL: p.baseUrl }
+      // 只有引擎配置里真写了 apiKey 的 provider 才回填 env 占位符；本地模型（无 key）保持无 key
+      if (p.hasKey) options.apiKey = `\${env:OPENCLAW_${String(p.id).toUpperCase().replace(/[^A-Z0-9_]/g, '_')}_API_KEY}`
+      provider[p.id] = { name: p.name, options, models }
+      order.push(p.id + '/' + (p.models[0]?.id || ''))
+    }
+    const obj = { provider, model: r.primaryRef || order[0] || '', 'x-hundun': { modelOrder: order } }
+    modelText.value = JSON.stringify(obj, null, 2)
+    runPreview()
+  } catch {
+    /* 反向加载失败不影响主流程：编辑器留空，用户可手动导入 */
   }
 }
 
@@ -256,6 +366,7 @@ onMounted(async () => {
     scrollToEnd()
   })
   await refresh()
+  await loadSavedModel()
   // 兜底轮询：IPC 事件丢了也不至于界面永远停在旧状态
   timer = window.setInterval(refresh, 3000)
 })
@@ -442,36 +553,87 @@ onBeforeUnmount(() => {
           <div class="hx-block-head">
             <span class="hx-block-title">模型</span>
             <span class="hx-chip" :class="canSend ? 'ready' : 'off'">
-              {{ canSend ? '可以说话' : '还不能说话' }}
+              {{ canSend ? '可以说话' : '还没配模型' }}
             </span>
           </div>
-          <div class="hx-kv">
-            <span>模型</span><code>{{ state.model?.ref ?? '未配置' }}</code>
+
+          <p class="hx-note">
+            把一份配置贴进来或导进来，软件会自己认出有哪些模型、现在用哪个。
+            支持 opencode 式的 JSON，key 写成 <code>{'{env:名字}'}</code> 就不会被存成明文。
+          </p>
+
+          <!-- 解析结果 -->
+          <div v-if="modelPreview && (modelPreview.errors?.length || modelPreview.warnings?.length)" class="hx-parse">
+            <div v-if="modelPreview.errors?.length" class="hx-parse-line bad">
+              <span class="hx-pmark">×</span>
+              <div><div v-for="(e, i) in modelPreview.errors" :key="'e' + i">{{ e }}</div></div>
+            </div>
+            <div v-if="modelPreview.warnings?.length" class="hx-parse-line warn">
+              <span class="hx-pmark">!</span>
+              <div><div v-for="(w, i) in modelPreview.warnings" :key="'w' + i">{{ w }}</div></div>
+            </div>
           </div>
-          <div class="hx-kv">
-            <span>API Key</span><code>{{ state.model?.keyPresent ? '已保存' : '未填写' }}</code>
+
+          <!-- 卡片链：排第一的先用 -->
+          <div v-if="chain.length" class="hx-mchain">
+            <div
+              v-for="(m, i) in chain"
+              :key="refOf(m)"
+              class="hx-mcard"
+              :class="{ head: i === 0 }"
+            >
+              <span class="hx-mrank">{{ i + 1 }}</span>
+              <div class="hx-mmain">
+                <div class="hx-mline">
+                  <span class="hx-mname">{{ m.modelName }}</span>
+                  <span v-if="i === 0" class="hx-mtag">先用这个</span>
+                  <span v-else class="hx-mtag alt">备用</span>
+                </div>
+                <div class="hx-msub">
+                  {{ m.providerName }}<span v-if="m.modelId !== m.modelName"> · {{ m.modelId }}</span
+                  ><span v-if="m.contextWindow"> · {{ fmtCtx(m.contextWindow) }}</span>
+                </div>
+                <div class="hx-murl">{{ m.baseUrl }}</div>
+              </div>
+              <div class="hx-mops">
+                <button v-if="i > 0" class="hx-mop" title="设为先用" @click="setHead(m)">先用</button>
+                <button v-if="i > 0" class="hx-mop" title="上移" @click="moveUp(m, i)">↑</button>
+                <button v-if="i < chain.length - 1" class="hx-mop" title="下移" @click="moveDown(m, i)">↓</button>
+                <button v-if="chain.length > 1" class="hx-mop del" title="移出清单" @click="drop(m)">✕</button>
+              </div>
+            </div>
           </div>
-          <div class="hx-row">
-            <input
-              v-model="keyInput"
-              class="hx-input"
-              type="password"
-              placeholder="粘贴 API Key，例如 sk-…"
-              spellcheck="false"
-              @keydown.enter.prevent="saveKey"
-            />
-            <button class="hx-btn" :disabled="savingKey || keyInput.trim().length === 0" @click="saveKey">
-              {{ savingKey ? '保存中…' : '保存并重启' }}
+          <p v-else-if="!modelPreview?.errors?.length" class="hx-note">
+            还没有模型。从文件导入一份配置，或展开「手写 JSON」贴一份。
+          </p>
+
+          <!-- 配置里有、还没排进来的 -->
+          <div v-if="candidates.length" class="hx-row">
+            <button
+              v-for="p in candidates"
+              :key="p.id"
+              class="hx-btn"
+              @click="p.models[0] && addOne(p, p.models[0])"
+            >
+              + {{ p.name }}
             </button>
           </div>
-          <p class="hx-note">
-            Key 存在应用数据目录（权限 0600），<strong>不在记忆目录里</strong>——记忆目录会被导出成 zip、也可能被云同步，
-            钥匙不该跟着走。保存后引擎会重启一次，因为凭据是在启动那一刻注入进程环境的。
-          </p>
-          <p class="hx-note">
-            模型走 OpenAI 兼容接口（<code>POST /v1/chat/completions</code>）。这个端点在引擎里<strong>默认关闭</strong>，
-            首次启动时已由我们写进配置打开。
-          </p>
+
+          <div class="hx-row">
+            <button class="hx-btn" @click="importFile">从文件导入</button>
+            <button class="hx-btn" @click="showJson = !showJson">{{ showJson ? '收起 JSON' : '手写 JSON' }}</button>
+            <span v-if="applyMsg" class="hx-status" :class="applyKind">{{ applyMsg }}</span>
+          </div>
+
+          <div v-if="showJson" class="hx-json-box">
+            <div class="hx-row">
+              <button class="hx-btn" :disabled="!modelPreview || !modelPreview.ok" @click="formatJson">格式化</button>
+              <button class="hx-btn" :disabled="applying" @click="applyModel()">
+                {{ applying ? '应用中…' : '应用' }}
+              </button>
+            </div>
+            <textarea v-model="modelText" class="hx-json-edit" spellcheck="false" autocomplete="off" @input="runPreview" />
+          </div>
         </div>
 
         <div class="hx-block">

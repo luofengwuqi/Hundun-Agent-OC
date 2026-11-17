@@ -2285,3 +2285,168 @@ textarea::placeholder {
 .hx-input:focus {
   border-color: var(--accent);
 }
+
+/* ── 模型配置（D028）────────────────────────────────────── */
+/* 卡片链：从上到下是尝试顺序，第一张「先用这个」。 */
+.hx-mchain {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 12px 0;
+}
+
+.hx-mcard {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid var(--line);
+  background: var(--panel);
+}
+
+.hx-mcard.head {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent) inset;
+}
+
+.hx-mrank {
+  flex: 0 0 auto;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  color: var(--accent);
+  background: var(--accent-soft);
+  font-weight: 600;
+}
+
+.hx-mmain {
+  flex: 1;
+  min-width: 0;
+}
+
+.hx-mline {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.hx-mname {
+  font-weight: 600;
+  font-size: 13.5px;
+}
+
+.hx-mtag {
+  font-size: 11px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: var(--accent);
+  color: #fff;
+}
+
+.hx-mtag.alt {
+  background: transparent;
+  color: var(--ink);
+  border: 1px solid var(--line);
+}
+
+.hx-msub {
+  font-size: 12px;
+  color: #8a7a63;
+  margin-top: 2px;
+}
+
+.hx-murl {
+  font-size: 11.5px;
+  color: #a99a85;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.hx-mops {
+  display: flex;
+  gap: 4px;
+  flex: 0 0 auto;
+}
+
+.hx-mop {
+  border: 1px solid var(--line);
+  background: transparent;
+  color: var(--ink);
+  border-radius: 6px;
+  padding: 3px 8px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.hx-mop:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.hx-mop.del:hover {
+  border-color: #a13a2f;
+  color: #a13a2f;
+}
+
+/* 解析结果（错误/警告） */
+.hx-parse {
+  margin: 10px 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.hx-parse-line {
+  display: flex;
+  gap: 8px;
+  padding: 8px 11px;
+  border-radius: 8px;
+  font-size: 12.5px;
+}
+
+.hx-parse-line.bad {
+  background: #fbebe9;
+  border: 1px solid #f0ccc7;
+  color: #a13a2f;
+}
+
+.hx-parse-line.warn {
+  background: #fdf1e4;
+  border: 1px solid #f2ddc2;
+  color: #8a5a2b;
+}
+
+.hx-pmark {
+  font-weight: 700;
+}
+
+/* JSON 编辑框 */
+.hx-json-box {
+  margin-top: 10px;
+}
+
+.hx-json-edit {
+  width: 100%;
+  min-height: 180px;
+  margin-top: 8px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  background: var(--panel);
+  color: var(--ink);
+  font-family: ui-monospace, "SFMono-Regular", "Menlo", monospace;
+  font-size: 12px;
+  line-height: 1.6;
+  resize: vertical;
+  outline: none;
+}
+
+.hx-json-edit:focus {
+  border-color: var(--accent);
+}

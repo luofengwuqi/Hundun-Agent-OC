@@ -39,6 +39,35 @@ export type ChatResult =
   | { ok: true; text: string }
   | { ok: false; kind: "auth" | "endpoint" | "engine" | "network" | "aborted"; message: string };
 
+export interface ModelPreviewDto {
+  ok: boolean;
+  errors: string[];
+  warnings: string[];
+  providers: Array<{
+    id: string;
+    name: string;
+    baseUrl: string;
+    hasKey: boolean;
+    models: Array<{ id: string; name: string; context: number }>;
+  }>;
+  selected: {
+    providerId: string;
+    providerName: string;
+    modelId: string;
+    modelName: string;
+    baseUrl: string;
+    contextWindow: number;
+  } | null;
+  chain: Array<{
+    providerId: string;
+    providerName: string;
+    modelId: string;
+    modelName: string;
+    baseUrl: string;
+    contextWindow: number;
+  }>;
+}
+
 export interface ShellApi {
   getState(): Promise<ShellStateDto & { logs: string[] }>;
   restartEngine(): Promise<ShellStateDto & { logs: string[] }>;
@@ -46,8 +75,13 @@ export interface ShellApi {
   sendChat(history: ChatTurnDto[]): Promise<ChatResult>;
   abortChat(): void;
   onChunk(cb: (delta: string) => void): void;
-  /** 保存模型密钥并重启引擎（环境变量只在 spawn 时注入，改完必须重启）。 */
-  setModelKey(key: string): Promise<ShellStateDto & { logs: string[] }>;
+  /** 模型配置：解析（不落盘）、应用（写引擎配置+secrets+重启）、导入文件、排序。 */
+  previewModel(text: string): Promise<ModelPreviewDto>;
+  applyModel(text: string): Promise<{ ok: boolean; errors: string[]; warnings: string[]; primaryRef: string | null; cfg: ShellStateDto }>;
+  pickModelFile(): Promise<{ ok: boolean; canceled?: boolean; path?: string; name?: string; text?: string; error?: string }>;
+  editModel(payload: { config: unknown; op: string; ref: string; to?: number }): Promise<{ ok: boolean; config?: unknown; error?: string; errors?: string[]; warnings?: string[] }>;
+  /** 反向加载引擎里已保存的 provider 集 + 首选模型，供设置页重启后渲染卡片链。 */
+  currentModel(): Promise<{ ok: boolean; providers: ModelPreviewDto["providers"]; primaryRef: string | null }>;
   /** 记忆根（文档目录下）。用户备份的就是这个文件夹。 */
   openMemoryDir(): Promise<string>;
   /** 人格与记忆所在的 workspace。 */
@@ -75,7 +109,11 @@ const api: ShellApi = {
   onChunk: (cb) => {
     ipcRenderer.on("chat:chunk", (_event, delta: string) => cb(delta));
   },
-  setModelKey: (key) => ipcRenderer.invoke("model:set-key", key),
+  previewModel: (text) => ipcRenderer.invoke("model:preview", text),
+  applyModel: (text) => ipcRenderer.invoke("model:apply", text),
+  pickModelFile: () => ipcRenderer.invoke("model:pick-file"),
+  editModel: (payload) => ipcRenderer.invoke("model:edit", payload),
+  currentModel: () => ipcRenderer.invoke("model:current"),
   openMemoryDir: () => ipcRenderer.invoke("shell:open-memory-dir"),
   openWorkspace: () => ipcRenderer.invoke("shell:open-workspace"),
   openDataDir: () => ipcRenderer.invoke("shell:open-data-dir"),

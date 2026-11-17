@@ -12,13 +12,15 @@ import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import {
   ensureConfigFile,
-  ensureModelProvider,
   readGatewayToken,
   readModelRef,
-  type ModelProviderSpec,
+  readSavedProviders,
+  writeModelProviders,
 } from "./engine/config";
-import { hasAnySecret, readSecrets, writeSecret } from "./engine/secrets";
+import { readSecrets, writeSecrets } from "./engine/secrets";
 import { ChatError, streamChat, type ChatTurn } from "./engine/chat";
+import { normalize, moveModel, addModel, removeModel } from "./engine/modelconfig";
+import { applyModelConfig } from "./engine/modelapply";
 import { findAdoptableEngine, probeReady, startEngine, clearRuntimeRecord, type EngineHandle, type RuntimeRecord } from "./engine/supervise";
 import { findFreePort } from "./engine/port";
 import { assertPackagedAssets, resolveEnginePaths, type EnginePaths } from "./engine/paths";
@@ -52,21 +54,6 @@ let modelRef: string | undefined;
 let keyPresent = false;
 /** 正在进行的对话请求，用于「停下」按钮。 */
 let activeChat: AbortController | undefined;
-
-/**
- * 默认模型路由。写成常量而不是散在各处，是为了让「换模型要改哪几行」一眼可见。
- *
- * 选 DeepSeek 是因为本机那份全局 OpenClaw 已经在用它（`deepseek/deepseek-v4-flash`），
- * 用户手里有这把钥匙；换别的 provider 只需改这一个对象。
- */
-const DEFAULT_MODEL: ModelProviderSpec = {
-  provider: "deepseek",
-  baseUrl: "https://api.deepseek.com/v1",
-  api: "openai-completions",
-  modelId: "deepseek-v4-flash",
-  modelName: "DeepSeek V4 Flash",
-  apiKeyEnv: "DEEPSEEK_API_KEY",
-};
 
 /**
  * 会话身份。**这是「它记得你」的唯一开关**。
@@ -247,7 +234,7 @@ async function bootEngine(): Promise<void> {
   // 模型与凭据状态先读出来：接管分支也要能如实报告「差哪一步」
   try {
     modelRef = await readModelRef(paths.configFile);
-    keyPresent = hasAnySecret(await readSecrets(paths.dataDir), [DEFAULT_MODEL.apiKeyEnv]);
+    keyPresent = Object.keys(await readSecrets(paths.dataDir)).length > 0;
   } catch {
     modelRef = undefined;
     keyPresent = false;
@@ -277,7 +264,7 @@ async function bootEngine(): Promise<void> {
 
     // 凭据只在 spawn 这一刻进环境变量。改完 key 必须重启引擎，正是因为这个。
     const secrets = await readSecrets(paths.dataDir);
-    keyPresent = hasAnySecret(secrets, [DEFAULT_MODEL.apiKeyEnv]);
+    keyPresent = Object.keys(secrets).length > 0;
 
     const port = await findFreePort();
     engine = await startEngine({
@@ -385,27 +372,114 @@ function registerIpc(): void {
   });
 
   /**
-   * 保存模型密钥。
+   * 模型配置：导入、预览、应用、排序（D028）。
    *
-   * 密钥进 `userData/secrets.json`（0600），**不进**记忆目录：
-   * 记忆目录会被导出成 zip（O13）、可能被云同步（O14）。详见 `engine/secrets.ts`。
+   * 用户手上的是一份 opencode 式 JSON（含 {env:}/{file:} 占位符），
+   * 引擎认识的是 models.providers 格式。这里做两件事：
+   *   preview —— 只解析不落盘，界面每敲一个字都来，必须廉价无副作用；
+   *   apply   —— 解析 + 翻译 + 写 openclaw.json + 写 secrets.json + 重启引擎。
    *
-   * 存完必须重启引擎——环境变量只在 spawn 那一刻注入，热改配置改不到它。
+   * 密钥纪律：引擎配置里只写 ${ENV} 插值，明文进 secrets.json（0600）。
    */
-  ipcMain.handle("model:set-key", async (_event, key: string) => {
-    const p = requirePaths();
-    await writeSecret(p.dataDir, DEFAULT_MODEL.apiKeyEnv, typeof key === "string" ? key : "");
-    keyPresent = typeof key === "string" && key.trim().length > 0;
-    if (keyPresent) {
-      await ensureModelProvider(p.configFile, DEFAULT_MODEL);
-      modelRef = await readModelRef(p.configFile);
+  ipcMain.handle("model:preview", (_event, text: string) => {
+    let obj: unknown;
+    try {
+      obj = JSON.parse(text);
+    } catch {
+      return { ok: false, errors: ["JSON 语法错误"], warnings: [], providers: [], selected: null, chain: [] };
     }
+    const r = normalize(obj, {});
+    return {
+      ok: r.ok,
+      errors: r.errors,
+      warnings: r.warnings,
+      providers: r.providers,
+      selected: r.selected,
+      chain: r.chain,
+    };
+  });
+
+  ipcMain.handle("model:apply", async (_event, text: string) => {
+    const p = requirePaths();
+    let obj: unknown;
+    try {
+      obj = JSON.parse(text);
+    } catch {
+      return { ok: false, errors: ["JSON 语法错误"], warnings: [] };
+    }
+    const r = applyModelConfig(obj, { existingSecrets: await readSecrets(p.dataDir) });
+    if (!r.ok) return { ok: false, errors: r.errors, warnings: r.warnings };
+
+    // 写 secrets（真实密钥）再写引擎配置（插值引用）
+    if (Object.keys(r.secrets).length) await writeSecrets(p.dataDir, r.secrets);
+    await writeModelProviders(p.configFile, r.providers, r.primaryRef);
+    modelRef = await readModelRef(p.configFile);
+    keyPresent = Object.keys(r.secrets).length > 0 || Object.values(r.providers).some((pr) => pr.apiKey);
+
+    // 引擎配置变了（尤其 provider 集），必须重启才生效
     if (engine) {
       await engine.stop();
       engine = undefined;
     }
     await bootEngine();
-    return currentStatus();
+    return { ok: true, warnings: r.warnings, primaryRef: r.primaryRef, cfg: currentStatus() };
+  });
+
+  ipcMain.handle("model:pick-file", async () => {
+    const r = await dialog.showOpenDialog(mainWindow!, {
+      title: "导入一份模型配置",
+      properties: ["openFile"],
+      filters: [
+        { name: "JSON 配置", extensions: ["json", "jsonc"] },
+        { name: "全部文件", extensions: ["*"] },
+      ],
+    });
+    if (r.canceled || !r.filePaths.length) return { ok: false, canceled: true };
+    const file = r.filePaths[0];
+    if (!file) return { ok: false, canceled: true };
+    try {
+      const raw = await readFile(file, "utf8");
+      // JSONC：去 BOM、注释、尾逗号（opencode 吃这些，我们也照做）
+      const text = raw
+        .replace(/^\uFEFF/, "")
+        .replace(/^\s*\/\/.*$/gm, "")
+        .replace(/\/\*[\s\S]*?\*\//g, "")
+        .replace(/,(\s*[}\]])/g, "$1");
+      return { ok: true, path: file, name: file.split(/[\\/]/).pop(), text };
+    } catch (e) {
+      return { ok: false, error: `读不了这个文件：${(e as Error).message}` };
+    }
+  });
+
+  /** 排序/增删：只改 JSON 对象不写盘，结果回界面走「预览 → 应用」。 */
+  ipcMain.handle("model:edit", (_event, payload: { config: unknown; op: string; ref: string; to?: number }) => {
+    const { config, op, ref, to } = payload || {};
+    let obj: Record<string, unknown>;
+    if (typeof config === "string") {
+      try { obj = JSON.parse(config) as Record<string, unknown>; }
+      catch { return { ok: false, error: "JSON 语法错误" }; }
+    } else if (config && typeof config === "object" && !Array.isArray(config)) {
+      obj = config as Record<string, unknown>;
+    } else {
+      return { ok: false, error: "这份配置不是一个对象" };
+    }
+
+    let r: { ok: boolean; config?: Record<string, unknown>; error?: string };
+    if (op === "move") r = moveModel(obj, ref, to ?? 0);
+    else if (op === "add") r = addModel(obj, ref);
+    else if (op === "remove") r = removeModel(obj, ref);
+    else return { ok: false, error: "不认识的操作：" + op };
+    if (!r.ok) return r;
+
+    const pv = normalize(r.config, {});
+    return { ok: true, config: r.config, errors: pv.errors, warnings: pv.warnings };
+  });
+
+  /** 设置页 onMounted 时反向加载已保存的 provider 集（D028）。引擎里已配好的模型，编辑器不能是空的。 */
+  ipcMain.handle("model:current", async () => {
+    const p = requirePaths();
+    const saved = await readSavedProviders(p.configFile);
+    return { ok: true, providers: saved.providers, primaryRef: saved.primaryRef };
   });
 
   // 记忆根（文档目录下）。用户要备份的就是这个文件夹，卸载不会删它（D024）
