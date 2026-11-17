@@ -236,7 +236,19 @@ function runPreview() {
     modelPreview.value = null
     return
   }
-  window.shellApi.previewModel(modelText.value).then((r) => (modelPreview.value = r))
+  window.shellApi.previewModel(modelText.value).then((r) => {
+    modelPreview.value = r
+    // claude 式配置：主进程已经转好了中间格式。提示一句，
+    // 并且自动把编辑器换成转换结果——否则卡片链操作（排序/增删）无从下手。
+    if (r.format === 'claude' && r.converted) {
+      const next = JSON.stringify(r.converted, null, 2)
+      if (modelText.value !== next) {
+        modelText.value = next
+        applyMsg.value = '识别为 Claude Code 配置，已转成可排序的中间格式'
+        applyKind.value = 'ok'
+      }
+    }
+  })
 }
 
 const chain = computed(() => modelPreview.value?.chain || [])
@@ -293,6 +305,47 @@ async function importFile() {
   runPreview()
 }
 
+/**
+ * 去该地址拉真实模型列表。claude 式配置不带列表（列表在服务端），
+ * 拉到就整份换掉 provider 的 models——顺序规则见 setProviderModels。
+ */
+const probing = ref(false)
+async function probeList() {
+  if (!modelText.value.trim() || probing.value) return
+  probing.value = true
+  applyMsg.value = '正在拉取模型列表…'
+  applyKind.value = ''
+  try {
+    let obj
+    try {
+      obj = JSON.parse(modelText.value)
+    } catch {
+      applyMsg.value = 'JSON 有语法错误，先改对再拉'
+      applyKind.value = 'bad'
+      return
+    }
+    const pid = modelPreview.value?.providers?.[0]?.id
+    const r = await window.shellApi.probeModel({ config: obj, providerId: pid })
+    if (!r.ok) {
+      applyMsg.value = r.error || '拉取失败'
+      applyKind.value = 'bad'
+      return
+    }
+    const e = await window.shellApi.editModel({ config: obj, op: 'setModels', ref: r.providerId, models: r.models })
+    if (!e.ok) {
+      applyMsg.value = e.error || '写回配置失败'
+      applyKind.value = 'bad'
+      return
+    }
+    modelText.value = JSON.stringify(e.config, null, 2)
+    runPreview()
+    applyMsg.value = `拉到 ${r.models.length} 个模型`
+    applyKind.value = 'ok'
+  } finally {
+    probing.value = false
+  }
+}
+
 function formatJson() {
   try {
     modelText.value = JSON.stringify(JSON.parse(modelText.value), null, 2)
@@ -339,9 +392,9 @@ async function loadSavedModel() {
       const models = {}
       for (const m of p.models) models[m.id] = { name: m.name, limit: { context: m.context || 0 } }
       const options = { baseURL: p.baseUrl }
-      // 只有引擎配置里真写了 apiKey 的 provider 才回填 env 占位符；本地模型（无 key）保持无 key
-      if (p.hasKey) options.apiKey = `\${env:OPENCLAW_${String(p.id).toUpperCase().replace(/[^A-Z0-9_]/g, '_')}_API_KEY}`
-      provider[p.id] = { name: p.name, options, models }
+      // 用保存时的真实插值名还原 {env:...}：猜出来的名字会让密钥引用指错环境变量。
+      if (p.hasKey) options.apiKey = `{env:${p.envName || 'OPENCLAW_' + String(p.id).toUpperCase().replace(/[^A-Z0-9_]/g, '_') + '_API_KEY'}}`
+      provider[p.id] = { name: p.name, api: p.api, options, models }
       order.push(p.id + '/' + (p.models[0]?.id || ''))
     }
     const obj = { provider, model: r.primaryRef || order[0] || '', 'x-hundun': { modelOrder: order } }
@@ -559,7 +612,8 @@ onBeforeUnmount(() => {
 
           <p class="hx-note">
             把一份配置贴进来或导进来，软件会自己认出有哪些模型、现在用哪个。
-            支持 opencode 式的 JSON，key 写成 <code>{'{env:名字}'}</code> 就不会被存成明文。
+            支持 opencode 式 JSON（key 写成 <code>{'{env:名字}'}</code> 不存明文），
+            也认 Claude Code 的 settings.json（env 里带 ANTHROPIC_* 的那种）。
           </p>
 
           <!-- 解析结果 -->
@@ -621,6 +675,9 @@ onBeforeUnmount(() => {
 
           <div class="hx-row">
             <button class="hx-btn" @click="importFile">从文件导入</button>
+            <button class="hx-btn" :disabled="probing || !modelPreview?.ok" @click="probeList">
+              {{ probing ? '拉取中…' : '拉取模型列表' }}
+            </button>
             <button class="hx-btn" @click="showJson = !showJson">{{ showJson ? '收起 JSON' : '手写 JSON' }}</button>
             <span v-if="applyMsg" class="hx-status" :class="applyKind">{{ applyMsg }}</span>
           </div>

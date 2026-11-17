@@ -66,6 +66,9 @@ export interface ModelPreviewDto {
     baseUrl: string;
     contextWindow: number;
   }>;
+  /** 输入的配置格式：claude 式会在主进程转换，converted 是转好的中间格式。 */
+  format?: "opencode" | "claude";
+  converted?: unknown;
 }
 
 export interface ShellApi {
@@ -79,7 +82,9 @@ export interface ShellApi {
   previewModel(text: string): Promise<ModelPreviewDto>;
   applyModel(text: string): Promise<{ ok: boolean; errors: string[]; warnings: string[]; primaryRef: string | null; cfg: ShellStateDto }>;
   pickModelFile(): Promise<{ ok: boolean; canceled?: boolean; path?: string; name?: string; text?: string; error?: string }>;
-  editModel(payload: { config: unknown; op: string; ref: string; to?: number }): Promise<{ ok: boolean; config?: unknown; error?: string; errors?: string[]; warnings?: string[] }>;
+  editModel(payload: { config: unknown; op: string; ref: string; to?: number; models?: Array<{ id: string; name?: string }> }): Promise<{ ok: boolean; config?: unknown; error?: string; errors?: string[]; warnings?: string[] }>;
+  /** 去该地址拉真实模型列表（GET /v1/models）。claude 式配置不带列表，靠它补全。 */
+  probeModel(payload: { config: unknown; providerId?: string }): Promise<{ ok: boolean; providerId?: string; models: Array<{ id: string; name: string }>; error?: string }>;
   /** 反向加载引擎里已保存的 provider 集 + 首选模型，供设置页重启后渲染卡片链。 */
   currentModel(): Promise<{ ok: boolean; providers: ModelPreviewDto["providers"]; primaryRef: string | null }>;
   /** 记忆根（文档目录下）。用户备份的就是这个文件夹。 */
@@ -113,6 +118,7 @@ const api: ShellApi = {
   applyModel: (text) => ipcRenderer.invoke("model:apply", text),
   pickModelFile: () => ipcRenderer.invoke("model:pick-file"),
   editModel: (payload) => ipcRenderer.invoke("model:edit", payload),
+  probeModel: (payload) => ipcRenderer.invoke("model:probe", payload),
   currentModel: () => ipcRenderer.invoke("model:current"),
   openMemoryDir: () => ipcRenderer.invoke("shell:open-memory-dir"),
   openWorkspace: () => ipcRenderer.invoke("shell:open-workspace"),

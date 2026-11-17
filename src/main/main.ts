@@ -9,6 +9,7 @@
  */
 import { app, BrowserWindow, dialog, ipcMain, shell, Tray, Menu, nativeImage, Notification } from "electron";
 import { readFile, writeFile } from "node:fs/promises";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   ensureConfigFile,
@@ -19,7 +20,9 @@ import {
 } from "./engine/config";
 import { readSecrets, writeSecrets } from "./engine/secrets";
 import { ChatError, streamChat, type ChatTurn } from "./engine/chat";
-import { normalize, moveModel, addModel, removeModel } from "./engine/modelconfig";
+import { normalize, moveModel, addModel, removeModel, setProviderModels } from "./engine/modelconfig";
+import { ensureOpencode } from "./engine/claudeconfig";
+import { probeModels } from "./engine/modelprobe";
 import { applyModelConfig } from "./engine/modelapply";
 import { findAdoptableEngine, probeReady, startEngine, clearRuntimeRecord, type EngineHandle, type RuntimeRecord } from "./engine/supervise";
 import { findFreePort } from "./engine/port";
@@ -381,21 +384,34 @@ function registerIpc(): void {
    *
    * 密钥纪律：引擎配置里只写 ${ENV} 插值，明文进 secrets.json（0600）。
    */
-  ipcMain.handle("model:preview", (_event, text: string) => {
+  ipcMain.handle("model:preview", async (_event, text: string) => {
     let obj: unknown;
     try {
       obj = JSON.parse(text);
     } catch {
-      return { ok: false, errors: ["JSON 语法错误"], warnings: [], providers: [], selected: null, chain: [] };
+      return { ok: false, errors: ["JSON 语法错误"], warnings: [], providers: [], selected: null, chain: [], format: "opencode", converted: null };
     }
-    const r = normalize(obj, {});
+    // claude 式配置先转成 opencode 式中间格式，再走同一条解析链。
+    // converted 回给界面：编辑器里展示的是中间格式，卡片/排序才有的放矢。
+    const { config, warnings: convWarn, format } = ensureOpencode(obj);
+    // {env:NAME} 先查进程环境再回退 secrets.json——apply 过之后真值住在 secrets 里，
+    // 不回退的话重启后的配置会被误判成「没 key」还弹 401 警告。
+    const secrets = await readSecrets(requirePaths().dataDir);
+    const r = normalize(config, {
+      resolveVar: (kind, name) => {
+        if (kind === "env") return process.env[name] ?? secrets[name] ?? "";
+        return "";
+      },
+    });
     return {
       ok: r.ok,
       errors: r.errors,
-      warnings: r.warnings,
+      warnings: [...convWarn, ...r.warnings],
       providers: r.providers,
       selected: r.selected,
       chain: r.chain,
+      format,
+      converted: format === "claude" ? config : null,
     };
   });
 
@@ -407,8 +423,11 @@ function registerIpc(): void {
     } catch {
       return { ok: false, errors: ["JSON 语法错误"], warnings: [] };
     }
-    const r = applyModelConfig(obj, { existingSecrets: await readSecrets(p.dataDir) });
-    if (!r.ok) return { ok: false, errors: r.errors, warnings: r.warnings };
+    // claude 式先转中间格式：preview 和 apply 必须共用同一个判据，
+    // 否则会出现「预览认出来了、应用没认出来」。
+    const { config, warnings: convWarn, format } = ensureOpencode(obj);
+    const r = applyModelConfig(config, { existingSecrets: await readSecrets(p.dataDir) });
+    if (!r.ok) return { ok: false, errors: r.errors, warnings: [...convWarn, ...r.warnings] };
 
     // 写 secrets（真实密钥）再写引擎配置（插值引用）
     if (Object.keys(r.secrets).length) await writeSecrets(p.dataDir, r.secrets);
@@ -422,7 +441,7 @@ function registerIpc(): void {
       engine = undefined;
     }
     await bootEngine();
-    return { ok: true, warnings: r.warnings, primaryRef: r.primaryRef, cfg: currentStatus() };
+    return { ok: true, warnings: [...convWarn, ...r.warnings], primaryRef: r.primaryRef, cfg: currentStatus(), format };
   });
 
   ipcMain.handle("model:pick-file", async () => {
@@ -452,8 +471,8 @@ function registerIpc(): void {
   });
 
   /** 排序/增删：只改 JSON 对象不写盘，结果回界面走「预览 → 应用」。 */
-  ipcMain.handle("model:edit", (_event, payload: { config: unknown; op: string; ref: string; to?: number }) => {
-    const { config, op, ref, to } = payload || {};
+  ipcMain.handle("model:edit", (_event, payload: { config: unknown; op: string; ref: string; to?: number; models?: Array<{ id: string; name?: string }> }) => {
+    const { config, op, ref, to, models } = payload || {};
     let obj: Record<string, unknown>;
     if (typeof config === "string") {
       try { obj = JSON.parse(config) as Record<string, unknown>; }
@@ -468,11 +487,38 @@ function registerIpc(): void {
     if (op === "move") r = moveModel(obj, ref, to ?? 0);
     else if (op === "add") r = addModel(obj, ref);
     else if (op === "remove") r = removeModel(obj, ref);
+    else if (op === "setModels") r = setProviderModels(obj, ref, models ?? []);
     else return { ok: false, error: "不认识的操作：" + op };
     if (!r.ok) return r;
 
     const pv = normalize(r.config, {});
     return { ok: true, config: r.config, errors: pv.errors, warnings: pv.warnings };
+  });
+
+  /**
+   * 去该地址拉真实模型列表（GET /v1/models）。
+   *
+   * claude 式配置天然没有模型列表，只有一个地址 + 一把钥匙——列表在服务端。
+   * 这里收配置原文而不是收钥匙：{env:}/{file:} 占位符在主进程解析成真值，
+   * 渲染层全程摸不到明文。只发一个只读请求；拉到什么就填什么，拉不到把手写权留给用户。
+   */
+  ipcMain.handle("model:probe", async (_event, payload: { config: unknown; providerId?: string }) => {
+    const { config, providerId } = payload || {};
+    const { config: opencode } = ensureOpencode(config);
+    // 与 apply 同一套占位符解析：env 先看进程环境，再回退 secrets.json——
+    // apply 过一次之后真值就住在 secrets 里，不在进程环境里。
+    const secrets = await readSecrets(requirePaths().dataDir);
+    const r = normalize(opencode, {
+      resolveVar: (kind, name) => {
+        if (kind === "env") return process.env[name] ?? secrets[name] ?? "";
+        try { return readFileSync(name, "utf8").trim(); }
+        catch { return ""; }
+      },
+    });
+    const prov = r.providers.find((p) => p.id === providerId) ?? r.providers[0];
+    if (!prov) return { ok: false, models: [], error: "这份配置里没有可用的 provider" };
+    const probed = await probeModels(prov.baseUrl, prov.apiKey);
+    return { ...probed, providerId: prov.id };
   });
 
   /** 设置页 onMounted 时反向加载已保存的 provider 集（D028）。引擎里已配好的模型，编辑器不能是空的。 */
