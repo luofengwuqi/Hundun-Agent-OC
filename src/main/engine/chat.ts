@@ -95,9 +95,24 @@ export async function streamChat(options: ChatOptions): Promise<string> {
 
   try {
     for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true });
+      // 类型用推导而不是具名的 ReadableStreamReadResult：主进程 tsconfig 不开 DOM lib，
+      // 那个类型名拿不到。
+      let chunk: Awaited<ReturnType<typeof reader.read>>;
+      try {
+        chunk = await reader.read();
+      } catch (error) {
+        // 流中途被掐（undici 的 "TypeError: terminated"、ECONNRESET 都落在这里）：
+        // 常见于引擎重启撞上在途回复、中继/网络抖动。不是「回复被截断」，
+        // 是连接断了。翻译成人话——原样甩 "TypeError: terminated" 只会让人
+        // 以为软件坏了或回复被限了字数（2026-11-17 用户真问过这个问题）。
+        const raw = (error as Error).message || String(error);
+        throw new ChatError(
+          `回复流被中断了（${raw}）。再说一次试试；总是这样就是网络或服务不稳。`,
+          "network",
+        );
+      }
+      if (chunk.done) break;
+      buffer += decoder.decode(chunk.value, { stream: true });
 
       // SSE 以空行分隔事件。最后一段可能不完整，留在 buffer 里等下一块。
       let boundary = buffer.indexOf("\n\n");
@@ -109,12 +124,12 @@ export async function streamChat(options: ChatOptions): Promise<string> {
           const payload = line.slice(5).trim();
           if (payload.length === 0 || payload === "[DONE]") continue;
           try {
-            const chunk = JSON.parse(payload) as {
+            const frame = JSON.parse(payload) as {
               choices?: { delta?: { content?: string }; finish_reason?: string | null }[];
               error?: { message?: string };
             };
-            if (chunk.error?.message) throw classify(500, chunk.error.message);
-            const delta = chunk.choices?.[0]?.delta?.content;
+            if (frame.error?.message) throw classify(500, frame.error.message);
+            const delta = frame.choices?.[0]?.delta?.content;
             if (typeof delta === "string" && delta.length > 0) {
               answer += delta;
               options.onDelta(delta);

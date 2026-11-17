@@ -244,12 +244,12 @@ export async function readModelRef(configPath: string): Promise<string | undefin
  * 否则用户会以为「配好的模型丢了」。这里把引擎格式翻译回界面认识的 provider/chain 形状。
  */
 export async function readSavedProviders(configPath: string): Promise<{
-  providers: Array<{ id: string; name: string; baseUrl: string; api: string; hasKey: boolean; envName: string | null; models: Array<{ id: string; name: string; context: number }> }>;
+  providers: Array<{ id: string; name: string; baseUrl: string; api: string; hasKey: boolean; envName: string | null; models: Array<{ id: string; name: string; context: number; output: number }> }>;
   primaryRef: string | null;
 }> {
   const { json } = await readJsonIfPresent(configPath);
   const models = json?.models;
-  const providers: Array<{ id: string; name: string; baseUrl: string; api: string; hasKey: boolean; envName: string | null; models: Array<{ id: string; name: string; context: number }> }> = [];
+  const providers: Array<{ id: string; name: string; baseUrl: string; api: string; hasKey: boolean; envName: string | null; models: Array<{ id: string; name: string; context: number; output: number }> }> = [];
   if (isObject(models)) {
     const provNode = models.providers;
     if (isObject(provNode)) {
@@ -269,11 +269,20 @@ export async function readSavedProviders(configPath: string): Promise<{
           api: typeof conf.api === "string" && conf.api ? conf.api : "openai-completions",
           hasKey: typeof conf.apiKey === "string" && conf.apiKey.length > 0,
           envName: interp && interp[1] ? interp[1] : null,
-          models: modelList.map((m) => ({
-            id: typeof m.id === "string" ? m.id : "",
-            name: typeof m.name === "string" && m.name ? m.name : (typeof m.id === "string" ? m.id : ""),
-            context: Number((m as Record<string, unknown>).context) > 0 ? Math.floor(Number((m as Record<string, unknown>).context)) : 0,
-          })),
+          models: modelList.map((m) => {
+            // 引擎模型行的元数据字段叫 contextWindow/maxTokens（不是 opencode 的
+            // limit.*，也不是 context）。读错字段名的话，上下文/输出上限会在重启后
+            // 悄悄丢成 0——往返一趟（apply → 重启 → 反向加载 → 再 apply）就把
+            // 元数据洗没了。这里读回成 opencode 语义的 context/output。
+            const ctx = Number(m.contextWindow);
+            const out = Number(m.maxTokens);
+            return {
+              id: typeof m.id === "string" ? m.id : "",
+              name: typeof m.name === "string" && m.name ? m.name : (typeof m.id === "string" ? m.id : ""),
+              context: Number.isFinite(ctx) && ctx > 0 ? Math.floor(ctx) : 0,
+              output: Number.isFinite(out) && out > 0 ? Math.floor(out) : 0,
+            };
+          }),
         });
       }
     }

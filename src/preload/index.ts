@@ -48,7 +48,11 @@ export interface ModelPreviewDto {
     name: string;
     baseUrl: string;
     hasKey: boolean;
-    models: Array<{ id: string; name: string; context: number }>;
+    /** 引擎 api 方言（claude 式转出来的是 anthropic-messages）。反向加载/预览都带。 */
+    api?: string;
+    /** 反向加载时的 ${ENV} 插值名（preview 没有这个字段）。 */
+    envName?: string | null;
+    models: Array<{ id: string; name: string; context: number; output: number }>;
   }>;
   selected: {
     providerId: string;

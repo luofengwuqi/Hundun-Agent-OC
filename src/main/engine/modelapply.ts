@@ -8,6 +8,8 @@
  *   provider.options.baseURL      → models.providers.<id>.baseUrl（须带 /v1）
  *   provider.options.apiKey       → 判断来源：{env:NAME} → ${NAME} 插值；明文 → 进 secrets
  *   provider.models 的键         → models.providers.<id>.models[].id
+ *   provider.models 的 limit.*   → 模型行的 contextWindow/maxTokens（缺输出上限且
+ *                                  api 是 anthropic-messages 时补 32000，见下）
  *   provider.api                 → 引擎的 api 方言（claude 式是 anthropic-messages，缺省 openai-completions）
  *   链的第一项（首选）           → agents.defaults.model.primary = "provider/model"
  *
@@ -24,7 +26,11 @@ export interface EngineProvider {
   baseUrl: string;
   apiKey?: string;
   api: string;
-  models: { id: string; name: string }[];
+  /**
+   * 引擎模型行认 `contextWindow`/`maxTokens`（字段名经引擎 defaults.ts 实测），
+   * 不是 opencode 的 limit.*。这两个值必须随行写过去——见下面 models 映射的注释。
+   */
+  models: { id: string; name: string; contextWindow?: number; maxTokens?: number }[];
 }
 
 export interface ApplyResult {
@@ -104,7 +110,23 @@ export function applyModelConfig(
       // api 方言随配置走：claude 式是 anthropic-messages，opencode 式/本地是 openai-completions。
       // 引擎拼 URL 时自己处理差异（anthropic-messages 会补 /v1/messages）。
       api: p.api || "openai-completions",
-      models: p.models.map((m) => ({ id: m.id, name: m.name })),
+      // limit 元数据随行写进引擎模型行：opencode 的 limit.context/limit.output
+      // → 引擎的 contextWindow/maxTokens。丢了它们引擎会按缺省值兜底——
+      // 尤其 anthropic-messages 传输必须带 max_tokens，行里没 maxTokens 时兜底
+      // 只有 4096（min(4096, context/4)，见引擎 anthropic-transport-options.ts），
+      // 长回复会被悄悄压断（2026-11-17 用户真问过「是不是限制了字数」）。
+      // 所以这类 api 缺上限时补 32000：引擎对自定义模型行的封顶就是
+      // min(maxTokens, 32000)，中继实测接受 32000。
+      models: p.models.map((m) => {
+        const row: { id: string; name: string; contextWindow?: number; maxTokens?: number } = {
+          id: m.id,
+          name: m.name,
+        };
+        if (m.context > 0) row.contextWindow = m.context;
+        if (m.output > 0) row.maxTokens = m.output;
+        else if (p.api === "anthropic-messages") row.maxTokens = 32_000;
+        return row;
+      }),
     };
 
     if (envName) {

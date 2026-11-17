@@ -318,8 +318,17 @@ export function setProviderModels(
   const out = JSON.parse(JSON.stringify(json)) as Record<string, unknown>;
   const provs = out.provider as Record<string, unknown>;
   const target = provs[pid] as Record<string, unknown>;
+  const oldModels =
+    (target.models && typeof target.models === "object" ? target.models : {}) as Record<string, unknown>;
   const modelNode: Record<string, unknown> = {};
-  for (const m of fresh) modelNode[m.id] = { name: m.name || m.id };
+  for (const m of fresh) {
+    // 探测只回 id/name。旧条目还有效的，limit 元数据（context/output）随行保留——
+    // 重建时丢了它，上下文/输出上限会被悄悄清零。
+    const old = (oldModels[m.id] && typeof oldModels[m.id] === "object"
+      ? oldModels[m.id]
+      : {}) as Record<string, unknown>;
+    modelNode[m.id] = { name: m.name || m.id, ...(old.limit ? { limit: old.limit } : {}) };
+  }
   target.models = modelNode;
 
   const known = new Set(fresh.map((m) => `${pid}/${m.id}`));

@@ -390,7 +390,14 @@ async function loadSavedModel() {
     const order = []
     for (const p of r.providers) {
       const models = {}
-      for (const m of p.models) models[m.id] = { name: m.name, limit: { context: m.context || 0 } }
+      for (const m of p.models) {
+        // context/output 都要随行还原：只还原 context 的话，输出上限会在
+        // 「重启 → 反向加载 → 再 apply」这一趟里被悄悄洗成缺省值。
+        const limit = {}
+        if (m.context > 0) limit.context = m.context
+        if (m.output > 0) limit.output = m.output
+        models[m.id] = Object.keys(limit).length ? { name: m.name, limit } : { name: m.name }
+      }
       const options = { baseURL: p.baseUrl }
       // 用保存时的真实插值名还原 {env:...}：猜出来的名字会让密钥引用指错环境变量。
       if (p.hasKey) options.apiKey = `{env:${p.envName || 'OPENCLAW_' + String(p.id).toUpperCase().replace(/[^A-Z0-9_]/g, '_') + '_API_KEY'}}`
