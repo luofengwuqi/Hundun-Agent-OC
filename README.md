@@ -41,8 +41,8 @@
 - 尚未确定：**Q 清单已归零；开放冲突 0 项**。剩余待办全在 O 清单：O02 模型凭据、O05 安全层缺口、O06 仓库前置、O07 极端情况求助渠道、O12 打包是否裁 docs、**O13 导出记忆 / O14 同步盘风险 / O16 手机接入开关 / O17 三平台托盘真机验证**（O15 已确认：三平台统一常驻）
 - 外部缺件与签认项：见 `docs/DECISIONS.md` 的 O 编号清单
 - **开放冲突 0 项**：X01（主动开口）已裁决为「每天一次、时间不固定、可开关」（D014）；X02（与 hundunAgent 的定位）已裁决（D012）
-- **下一步**：接对话收发——需先核实 OpenAI 兼容 HTTP 接口的配置键，写错键会让引擎以 78 退出。托盘（含三平台口径）已完成，这个前置条件不再挡路
-- 一句话现状：**壳已经是馄饨的样子了**（Vue 3 + 奶油白朱红），引擎能起能停、关窗后还留在托盘里、记忆落在卸载不丢的位置；**但还不能说话**，对话是眼下唯一的实质缺口
+- **下一步**：① 在设置页填入真实 API Key，跑通第一句真正的回复（O02，唯一的外部缺件）；② 接了真 key 之后再做「被记住」的验收（同一 session key 下跨轮次回忆）
+- 一句话现状：**壳已经是馄饨的样子了**（Vue 3 + 奶油白朱红），引擎能起能停、关窗后留在托盘里、对话通道已打通（假 key 验到 provider 返回 401 并如实显示）；**差一把真钥匙就能说话**
 
 ## 已核实的上游事实（不是本项目的选型决策）
 
@@ -76,6 +76,9 @@
 | 第三方插件落点 | `~/.openclaw/extensions`、`<workspace>/.openclaw/extensions`、`plugins.load.paths`；**不需要改包内文件**。`plugins.entries.<id>.hooks.allowPromptInjection` 是核心显式管「谁能改提示词」的开关 | `docs/gateway/config-extensions.md` |
 | 内置记忆工具**无写入能力** | 工具共 4 个：`memory_search`、`memory_get`、`memory_entry_origins`、`memory_session_tombstones` —— **全是读或元数据，没有写、也没有删单条**。另有 CLI `openclaw memory forget`，但它是**会话级排除**（让某些 session 不再进未来扫描），不是删除具体记忆内容 | `docs/concepts/memory.md`、`docs/cli/memory.md`（2026-11-13 修正：此前误记为「只有 search/get 两个」） |
 | **记忆落盘不靠工具（关键）** | 两条写路径：①**compaction 前的 memory flush**，靠 agent 调 `write` 工具写日常笔记，**受工具策略约束**；②**Dreaming**（默认开启、后台 cron、`tool-free completion`），由核心直接改写 `MEMORY.md`，**不经模型的手、不受工具策略影响** | `docs/concepts/memory.md` L246–281、`docs/concepts/dreaming.md` |
+| **OpenAI 兼容端点默认关闭** | `POST /v1/chat/completions`（以及同组的 `/v1/models`）**默认不可用**，需 `gateway.http.endpoints.chatCompletions.enabled: true`。实测未开启时连 `/v1/models` 都返回 404，容易被误判成「版本不支持」。另有 `gateway.http.endpoints.responses.enabled` 控制 `/v1/responses` | `dist/schema-base-*.mjs`；2026-11-17 实机 404 → 开启后 200 |
+| **`x-openclaw-session-key` 决定它记不记得你** | 该请求头指定请求落在哪段会话；**不带就是一个随机新会话**，每次说话都是初见面。保留命名空间（`subagent:` / `cron:` / `acp:`）不可用。流式响应是标准 OpenAI chunk，但**结束不保证有 `[DONE]`**，要同时认 `finish_reason` 与流关闭 | `docs/gateway/health.md`、`dist/http-utils-*.mjs`、`dist/openai-http-*.mjs` |
+| 自定义 provider 走环境变量取密钥 | `models.providers.<id>` 支持 `apiKey: "${ENV_NAME}"` 插值。DeepSeek 的官方 provider 插件读的是 `DEEPSEEK_API_KEY`（插件装在 `~/.openclaw/npm/projects/`，**隔离实例里没有**，所以我们用 `models.providers` 直连，不依赖插件） | 插件包实查；2026-11-17 实测 |
 | 工具面与记忆的约束关系 | `minimal` 会掐掉 memory flush 依赖的 `write`，记忆退化为「等 Dreaming 跑过」。→ **X03 已裁决（D021）**：不追求工具清零，保留 `write`，改从「动作白名单」压工具性 | `docs/concepts/memory.md` L246–281；`DECISIONS.md` X03、D021 |
 | 危机干预（新版复查） | 2026.11.3 的 `dist/` 与 `docs/` 对 `suicide` / `self-harm` / `危机干预` / `心理援助` 仍**全部零命中** —— G1 结论不因版本变化失效 | `grep -rli` 实查 |
 | 真机引导产物 | `~/.openclaw/workspace/` 下 `AGENTS.md`、`SOUL.md`、`IDENTITY.md`、`USER.md`、`BOOTSTRAP.md` 五件齐备，`state/openclaw.sqlite` 1.6 MB —— **「人格即文件」在真机上得到证实** | 实查目录 |

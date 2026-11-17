@@ -36,6 +36,12 @@ export interface StartOptions {
   readonly token: string;
   /** 首启时带上它：配置不合法也允许启动。仅在用户明确选择时使用（SHELL-SKELETON §3.3）。 */
   readonly allowUnconfigured?: boolean;
+  /**
+   * 注入给引擎的凭据类环境变量（来自 `userData/secrets.json`，0600）。
+   * 走环境变量而不是写进 openclaw.json：配置那份文件用户会打开、会截图，
+   * 明文密钥躺进去迟早外泄。环境变量只活在子进程内存里。
+   */
+  readonly secrets?: Readonly<Record<string, string>>;
   readonly onLog?: (line: string) => void;
 }
 
@@ -67,9 +73,14 @@ export async function probeReady(port: number, timeoutMs = 1500): Promise<boolea
   }
 }
 
-function buildEnv(paths: EnginePaths, port: number): NodeJS.ProcessEnv {
+function buildEnv(
+  paths: EnginePaths,
+  port: number,
+  secrets: Readonly<Record<string, string>> = {},
+): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {
     ...process.env,
+    ...secrets,
     OPENCLAW_HOME: paths.engineHome,
     // ⚠️ 只设 OPENCLAW_HOME 不够。实测（2026-11-13）：只给 HOME 时引擎报
     //   `Missing config. Run openclaw setup or set gateway.mode=local`
@@ -144,7 +155,7 @@ export async function startEngine(options: StartOptions): Promise<EngineHandle> 
   pushLog(ring, `[shell] spawn ${paths.nodeBinary} ${args.join(" ")}`, options.onLog);
 
   const child: ChildProcess = spawn(paths.nodeBinary, args, {
-    env: buildEnv(paths, port),
+    env: buildEnv(paths, port, options.secrets),
     stdio: ["ignore", "pipe", "pipe"],
     // 不经 shell：这是信号能直达引擎的前提（SHELL-SKELETON §3.5）。
     shell: false,

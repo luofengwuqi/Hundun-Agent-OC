@@ -8,8 +8,17 @@
  *      所以这一步留到下一版，宁可界面上明说「还没接」。
  */
 import { app, BrowserWindow, dialog, ipcMain, shell, Tray, Menu, nativeImage, Notification } from "electron";
+import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { ensureConfigFile, readGatewayToken } from "./engine/config";
+import {
+  ensureConfigFile,
+  ensureModelProvider,
+  readGatewayToken,
+  readModelRef,
+  type ModelProviderSpec,
+} from "./engine/config";
+import { hasAnySecret, readSecrets, writeSecret } from "./engine/secrets";
+import { ChatError, streamChat, type ChatTurn } from "./engine/chat";
 import { findAdoptableEngine, probeReady, startEngine, clearRuntimeRecord, type EngineHandle, type RuntimeRecord } from "./engine/supervise";
 import { findFreePort } from "./engine/port";
 import { assertPackagedAssets, resolveEnginePaths, type EnginePaths } from "./engine/paths";
@@ -37,6 +46,53 @@ let state: ShellState = emptyState();
 let engine: EngineHandle | undefined;
 let paths: EnginePaths | undefined;
 let mainWindow: BrowserWindow | undefined;
+/** 当前配置里的默认模型 ref（未配置时为 undefined）。 */
+let modelRef: string | undefined;
+/** 是否已有可选用的凭据。 */
+let keyPresent = false;
+/** 正在进行的对话请求，用于「停下」按钮。 */
+let activeChat: AbortController | undefined;
+
+/**
+ * 默认模型路由。写成常量而不是散在各处，是为了让「换模型要改哪几行」一眼可见。
+ *
+ * 选 DeepSeek 是因为本机那份全局 OpenClaw 已经在用它（`deepseek/deepseek-v4-flash`），
+ * 用户手里有这把钥匙；换别的 provider 只需改这一个对象。
+ */
+const DEFAULT_MODEL: ModelProviderSpec = {
+  provider: "deepseek",
+  baseUrl: "https://api.deepseek.com/v1",
+  api: "openai-completions",
+  modelId: "deepseek-v4-flash",
+  modelName: "DeepSeek V4 Flash",
+  apiKeyEnv: "DEEPSEEK_API_KEY",
+};
+
+/**
+ * 会话身份。**这是「它记得你」的唯一开关**。
+ *
+ * 引擎的 `x-openclaw-session-key` 决定请求落进哪段会话：不给就是一个全新随机会话，
+ * 每次说话它都是第一次见你。所以这个值必须持久化——存 userData，
+ * 卸载时随应用消失（记忆本体在文档目录，不在这里）。
+ *
+ * 格式限制（实测自源码）：不能用 `subagent:` / `cron:` / `acp:` 开头，
+ * 那是引擎的保留命名空间。其余字符随意。
+ */
+const SESSION_FILE = "session.json";
+const SESSION_KEY = "hundun-main";
+
+async function readSessionKey(dataDir: string): Promise<string> {
+  try {
+    const raw = await readFile(join(dataDir, SESSION_FILE), "utf8");
+    const parsed = JSON.parse(raw) as { sessionKey?: unknown };
+    if (typeof parsed.sessionKey === "string" && parsed.sessionKey.trim().length > 0) {
+      return parsed.sessionKey.trim();
+    }
+  } catch {
+    // 第一次运行、或文件坏了：用默认 key。坏了不该阻断对话。
+  }
+  return SESSION_KEY;
+}
 /** 收尾期间窗口正在销毁，此时再往渲染进程发消息只会刷一屏 "Render frame was disposed"。 */
 let shuttingDown = false;
 /** 用户明确要求退出（托盘菜单 / 系统关机）。只有它能让 close 事件放行。 */
@@ -172,6 +228,14 @@ function publicState(): Record<string, unknown> {
     memoryDir: paths?.engineHome ?? null,
     // 应用自己的数据（缓存、运行时记录），卸载可以删
     dataDir: paths?.dataDir ?? null,
+    // 界面上「能不能说话」由这两条共同决定：
+    //   没有模型 ref → 引擎会退回内置 openai 路由，必然报鉴权错误
+    //   没有密钥     → 路由接上了但 provider 拿不到凭据
+    // 分开报是为了让用户看到「差哪一步」，而不是笼统一句失败了。
+    model: {
+      ref: modelRef ?? null,
+      keyPresent: keyPresent,
+    },
   };
 }
 
@@ -179,6 +243,15 @@ async function bootEngine(): Promise<void> {
   if (!paths) return;
   state = { ...emptyState(), status: "starting" };
   broadcast();
+
+  // 模型与凭据状态先读出来：接管分支也要能如实报告「差哪一步」
+  try {
+    modelRef = await readModelRef(paths.configFile);
+    keyPresent = hasAnySecret(await readSecrets(paths.dataDir), [DEFAULT_MODEL.apiKeyEnv]);
+  } catch {
+    modelRef = undefined;
+    keyPresent = false;
+  }
 
   // 上一次壳崩了但引擎还活着 → 接管，而不是再起一个（SHELL-SKELETON §4.2）。
   const adoptable = await findAdoptableEngine(paths.runtimeRecord);
@@ -202,11 +275,16 @@ async function bootEngine(): Promise<void> {
     const token = await readGatewayToken(paths.configFile);
     if (!token) throw new Error("配置里读不到 gateway.auth.token");
 
+    // 凭据只在 spawn 这一刻进环境变量。改完 key 必须重启引擎，正是因为这个。
+    const secrets = await readSecrets(paths.dataDir);
+    keyPresent = hasAnySecret(secrets, [DEFAULT_MODEL.apiKeyEnv]);
+
     const port = await findFreePort();
     engine = await startEngine({
       paths,
       port,
       token,
+      secrets,
       onLog: (line) => {
         sendToWindow("shell:log", line);
       },
@@ -250,6 +328,78 @@ function registerIpc(): void {
   ipcMain.handle("shell:get-state", () => currentStatus());
 
   ipcMain.handle("shell:restart-engine", async () => {
+    if (engine) {
+      await engine.stop();
+      engine = undefined;
+    }
+    await bootEngine();
+    return currentStatus();
+  });
+
+  /**
+   * 说一句话。
+   *
+   * 上下文由渲染层带着历史一起发上来，壳不替它记——这样「界面上看到的」和
+   * 「发给模型的」永远是同一份，不会出现两边悄悄分叉。
+   *
+   * 失败不抛异常而是返回结构化结果：IPC 抛错只剩一条 message，
+   * 而我们需要把「缺密钥 / 缺模型 / 引擎没起来」分开展示（three very different fixes）。
+   */
+  ipcMain.handle("chat:send", async (_event, history: ChatTurn[]) => {
+    if (!paths) return { ok: false as const, kind: "engine" as const, message: "还没初始化完成" };
+    if (!state.port) return { ok: false as const, kind: "engine" as const, message: "引擎还没起来" };
+
+    const token = await readGatewayToken(paths.configFile);
+    if (!token) return { ok: false as const, kind: "auth" as const, message: "读不到网关 token" };
+
+    const sessionKey = await readSessionKey(paths.dataDir);
+    activeChat?.abort();
+    const controller = new AbortController();
+    activeChat = controller;
+
+    try {
+      const text = await streamChat({
+        port: state.port,
+        token,
+        sessionKey,
+        messages: history,
+        signal: controller.signal,
+        onDelta: (delta) => sendToWindow("chat:chunk", delta),
+      });
+      return { ok: true as const, text };
+    } catch (error) {
+      if ((error as Error).name === "AbortError") {
+        return { ok: false as const, kind: "aborted" as const, message: "停下了" };
+      }
+      if (error instanceof ChatError) {
+        return { ok: false as const, kind: error.kind, message: error.message };
+      }
+      return { ok: false as const, kind: "engine" as const, message: String(error) };
+    } finally {
+      if (activeChat === controller) activeChat = undefined;
+    }
+  });
+
+  ipcMain.on("chat:abort", () => {
+    activeChat?.abort();
+  });
+
+  /**
+   * 保存模型密钥。
+   *
+   * 密钥进 `userData/secrets.json`（0600），**不进**记忆目录：
+   * 记忆目录会被导出成 zip（O13）、可能被云同步（O14）。详见 `engine/secrets.ts`。
+   *
+   * 存完必须重启引擎——环境变量只在 spawn 那一刻注入，热改配置改不到它。
+   */
+  ipcMain.handle("model:set-key", async (_event, key: string) => {
+    const p = requirePaths();
+    await writeSecret(p.dataDir, DEFAULT_MODEL.apiKeyEnv, typeof key === "string" ? key : "");
+    keyPresent = typeof key === "string" && key.trim().length > 0;
+    if (keyPresent) {
+      await ensureModelProvider(p.configFile, DEFAULT_MODEL);
+      modelRef = await readModelRef(p.configFile);
+    }
     if (engine) {
       await engine.stop();
       engine = undefined;

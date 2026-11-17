@@ -524,6 +524,31 @@
 
 **托盘不能装样子**：Linux 上 AppIndicator 缺失时 `new Tray()` 可能**建出对象但不显示图标**——此时 `tray` 变量非空，`close` 拦截照旧生效，用户点了红叉窗口消失且**再也叫不回来**（没有图标可点）。所以创建失败必须把 `tray` 置 `undefined`，并回退「关窗即退出」。**没托盘绝不能 hide**，这是 §4.4 之外单独要守的一条。
 
+### D027 对话通道：走引擎自带的 OpenAI 兼容 HTTP，不自己拼模型 SDK
+
+- 内容：界面 ↔ 壳 ↔ 引擎全走 HTTP：`POST /v1/chat/completions`，Bearer 网关 token 鉴权，**用 `x-openclaw-session-key` 维持会话身份**，流式读 SSE。壳不直接调用任何模型供应商 SDK。
+- 状态：已确认（实现并实测）
+- 确认方式：技术验证 + 用户「推吧 推完之后去搞对话了」
+- 确认日期：2026-11-17
+- 适用版本：实施期
+- 影响：`engine/chat.ts`（SSE 客户端）、`engine/secrets.ts`（凭据落点）、`engine/config.ts`（端点与 provider 键）、`main.ts`（IPC）、`App.vue`（对话界面）
+- 替代：壳里自己接模型 SDK / 走 WebSocket RPC（都落选，理由见下）
+
+**四条实机事实（2026.11.3，本机验证，不是照文档抄的）**：
+
+| # | 事实 | 依据 |
+| --- | --- | --- |
+| 1 | **该端点默认关闭**：`gateway.http.endpoints.chatCompletions.enabled`（schema 原话 default: false）。不开它连 `/v1/models` 都是 404——它们属于同一组开关 | `dist/schema-base-*.mjs`；实测 404 → 开启后 200 |
+| 2 | **`x-openclaw-session-key` 是「它记得你」的唯一开关**。不带头就是一个随机新会话，每次说话都是初见面 | `docs/gateway/health.md` + `dist/http-utils-*.mjs` |
+| 3 | 流是标准 OpenAI chunk（`choices[0].delta.content`），**结束不保证有 `[DONE]`**，必须同时认 `finish_reason` 与流关闭 | `dist/openai-http-*.mjs` |
+| 4 | 模型路由要 `agents.defaults.model.primary` + `models.providers.<id>`（`baseUrl` 带 `/v1`、`api: openai-completions`、`apiKey: "${ENV}"`）。缺第一个会退回内置 openai 路由并报 `No route-compatible authentication source` | 实测 |
+
+**为什么会话 key 必须持久化**：这是产品命题（D011「被记住」）的技术实现点。用一个固定且持久的值（`hundun-main`，可用 `userData/session.json` 覆盖），卸载前一直在同一段记忆里。用随机值等于每句话都重新认识一次人。
+
+**凭据落点（安全边界，不可改）**：`userData/secrets.json`，0600，**启动引擎时注入环境变量**。不进 `openclaw.json`（会被截图外发），不进记忆目录（会被导出成 zip，O13；可能上云，O14）。
+
+**为什么不自己接 SDK**：模型供应商、重试、工具面、技能装配、上下文压缩全在引擎里，壳自己接等于把这条链重新实现一遍，而且会绕开 D021 的工具面约束。壳只做「把话递进去、把字取回来」。
+
 ## 2. 未决问题（Q）
 
 | 编号 | 问题 | 为什么要问 | 推荐（可选） | 状态 | 关联决策 |
@@ -547,7 +572,7 @@
 | 编号 | 类别 | 事项 | 影响 | 由谁推进 | 截止条件 |
 | --- | --- | --- | --- | --- | --- |
 | O01 | 实现层待裁 | ~~壳与引擎的进程模型与协议选型~~ → **已关闭**（D017）：实测证明 Electron 28.3.3 无法承载（无 `node:sqlite`、engines 不满足），定为外挂子进程 + 自带 Node + HTTP 起步。协议面若后续需要事件流仍可再评估，但不影响工程结构 | `SHAPE-ELECTRON.md` §2–§3、§6；A08 | 用户 + 实施 | 已达成（2026-11-12 实测） |
-| O02 | 外部缺件 | 模型供应商凭据：按 D008 由用户自带配置文件提供，**当前尚未提供任何凭据**，自测流程无法预先验证 | `SHAPE-ELECTRON.md` §5；验收行 A03 | 用户 | 导入一份可用配置并跑通 `models status --probe` |
+| O02 | 外部缺件 | 模型供应商凭据：按 D008 由用户自带，**仍未提供真实凭据**。2026-11-17 已把「填 key 的通道」做出来（设置页 → `userData/secrets.json` 0600 → 启动引擎注入 `DEEPSEEK_API_KEY`），并用假 key 验到「provider 返回 401 且错误如实显示在界面上」这一步——**整条链路已通，只差一把真钥匙** | `SHAPE-ELECTRON.md` §5；D027；验收行 A03 | 用户 | 在设置页填入可用 key |
 | O03 | 书面签认 | 无（D002 个人自用 / 原型）；引入第三方时须升档并补建对外核实单 | — | — | — |
 | O04 | 环境阻塞 | ~~本机无合格 Node、openclaw 未构建~~ → **已关闭**（2026-11-13）。① PATH 首位 Node v24.22.3 满足 engines；② 用户已在本机正式跑起 OpenClaw，装的是 npm 包 **2026.11.3**（`~/.local/lib/node_modules/openclaw`），**不是**源码仓库那份 2026.10.10 的 `dist/`；③ `~/.openclaw` 已生成：`state/openclaw.sqlite` 1.6 MB + WAL、`workspace/` 下 `AGENTS.md`/`SOUL.md`/`IDENTITY.md`/`USER.md`/`BOOTSTRAP.md` 五个引导文件齐备、`gateway.mode=local` + token 鉴权、模型 `deepseek/deepseek-v4-flash`。**「人格即文件」由此在真机上得到证实**，不再只是源码推断。仍待：`models status --probe` 未单独跑过（需独占状态目录，要停 Gateway） | `docs/FEASIBILITY-A.md` §5；验收行 A02 | 用户 + 实施 | 已达成；余项见左列末句 |
 | O05 | 实现层缺口 | 上游 `src/`、`extensions/`、`docs/` 对「自伤 / 自杀」三处零命中，无对话内容安全分类器；危机干预无法由 A 层配置兜住，需 B 层插件 + 真人口径 | `docs/FEASIBILITY-A.md` G1；Q004 | 用户（口径）· 实施（插件） | Q004 定稿后立实施条目 |

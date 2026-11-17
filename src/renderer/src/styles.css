@@ -2247,3 +2247,41 @@ textarea::placeholder {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+
+/* ── 对话（D027）────────────────────────────────────────── */
+/* 它说的话不用气泡：一列文字，像日记页。宽高都跟着容器走。 */
+.hx-reply {
+  padding-top: 2px;
+  line-height: 1.85;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* 等第一个字的时候显示的省略号。不做转圈动画——那更像加载器，不像在写字。 */
+.hx-typing {
+  opacity: 0.45;
+  animation: hx-breathe 1.4s ease-in-out infinite;
+}
+
+@keyframes hx-breathe {
+  0%, 100% { opacity: 0.25; }
+  50% { opacity: 0.6; }
+}
+
+/* 设置页的密钥输入。宽度用 flex 吃掉剩余空间，按钮不换行。 */
+.hx-input {
+  flex: 1;
+  min-width: 0;
+  font: inherit;
+  font-size: 12.5px;
+  padding: 7px 11px;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  background: var(--panel);
+  color: var(--ink);
+  outline: none;
+}
+
+.hx-input:focus {
+  border-color: var(--accent);
+}

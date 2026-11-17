@@ -21,6 +21,22 @@ export interface SeedOptions {
   readonly model?: string;
 }
 
+/** 一个自定义 provider 的完整描述。字段全部有出处，见 `ensureModelProvider` 的注释。 */
+export interface ModelProviderSpec {
+  /** provider id，会成为模型 ref 的前缀，例如 `deepseek`。 */
+  readonly provider: string;
+  /** OpenAI 兼容的 base URL，必须带 `/v1`。 */
+  readonly baseUrl: string;
+  /** 协议形态。实测本机只认 `openai-completions` 这一档能走通。 */
+  readonly api: string;
+  /** 模型 id，例如 `deepseek-v4-flash`。 */
+  readonly modelId: string;
+  /** 界面上显示的名字。 */
+  readonly modelName: string;
+  /** 密钥来自哪个环境变量，例如 `DEEPSEEK_API_KEY`。配置里只写 `${ENV}`，不写明文。 */
+  readonly apiKeyEnv: string;
+}
+
 export interface SeedResult {
   readonly configPath: string;
   readonly created: boolean;
@@ -63,6 +79,17 @@ export function buildSeed(options: SeedOptions = {}): Json {
     gateway: {
       mode: "local",
       auth: { mode: "token", token: options.token ?? generateToken() },
+      http: {
+        endpoints: {
+          /**
+           * `POST /v1/chat/completions` **默认是关的**（schema 原话：
+           * "Enable the OpenAI-compatible POST /v1/chat/completions endpoint (default: false)"）。
+           * 实测：不开这个键，连 `/v1/models` 都返回 404——它属于同一组开关。
+           * 我们的界面全部对话都走这个端点，所以必须开。
+           */
+          chatCompletions: { enabled: true },
+        },
+      },
     },
     tools: {
       exec: {
@@ -141,4 +168,71 @@ export async function readGatewayToken(configPath: string): Promise<string | und
   if (!isObject(auth)) return undefined;
   const token = auth.token;
   return typeof token === "string" && token.length > 0 ? token : undefined;
+}
+
+/**
+ * 写入自定义 provider + 默认模型。
+ *
+ * 这几个键都经过实测（2026-11-17，引擎 2026.11.3），不是照文档抄的：
+ *   `agents.defaults.model.primary` —— 不写它，请求会退回内置 openai 路由，报
+ *        "No route-compatible authentication source is configured for openai."
+ *   `models.providers.<id>.baseUrl` —— 必须带 `/v1`
+ *   `models.providers.<id>.apiKey`  —— 写 `${ENV}` 插值，**不写明文**：
+ *        明文会躺在用户随时会打开、也随时会截图发出去的配置里
+ *   `models.providers.<id>.api`     —— `openai-completions`
+ *
+ * 判据：写完引擎仍能正常启动（配置被接受、没有触发 78 退出），并且错误从
+ * 「没有鉴权源」变成「provider 鉴权失败」——那说明模型路由真的接上了。
+ */
+export async function ensureModelProvider(
+  configPath: string,
+  spec: ModelProviderSpec,
+): Promise<{ changed: boolean; modelRef: string }> {
+  const modelRef = `${spec.provider}/${spec.modelId}`;
+  const { json } = await readJsonIfPresent(configPath);
+  if (!json) throw new Error("配置文件不存在，先确保 ensureConfigFile 跑过");
+
+  const next: Json = { ...json };
+
+  const agents = isObject(next.agents) ? { ...next.agents } : {};
+  const defaults = isObject(agents.defaults) ? { ...agents.defaults } : {};
+  const model = isObject(defaults.model) ? { ...defaults.model } : {};
+  model.primary = modelRef;
+  defaults.model = model;
+  agents.defaults = defaults;
+  next.agents = agents;
+
+  const models = isObject(next.models) ? { ...next.models } : {};
+  // merge：保留用户自己定义的其他 provider，不做整体替换
+  models.mode = models.mode ?? "merge";
+  const providers = isObject(models.providers) ? { ...models.providers } : {};
+  providers[spec.provider] = {
+    baseUrl: spec.baseUrl,
+    apiKey: `\${${spec.apiKeyEnv}}`,
+    api: spec.api,
+    models: [{ id: spec.modelId, name: spec.modelName }],
+  };
+  models.providers = providers;
+  next.models = models;
+
+  if (JSON.stringify(next) === JSON.stringify(json)) return { changed: false, modelRef };
+
+  const backup = `${configPath}.bak-${Date.now()}`;
+  await copyFile(configPath, backup);
+  await writeFile(configPath, `${JSON.stringify(next, null, 2)}\n`, { mode: 0o600 });
+  await chmod(configPath, 0o600);
+  return { changed: true, modelRef };
+}
+
+/** 当前配置里的默认模型 ref。界面用它判断「配没配模型」。 */
+export async function readModelRef(configPath: string): Promise<string | undefined> {
+  const { json } = await readJsonIfPresent(configPath);
+  const agents = json?.agents;
+  if (!isObject(agents)) return undefined;
+  const defaults = agents.defaults;
+  if (!isObject(defaults)) return undefined;
+  const model = defaults.model;
+  if (!isObject(model)) return undefined;
+  const primary = model.primary;
+  return typeof primary === "string" && primary.length > 0 ? primary : undefined;
 }

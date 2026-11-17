@@ -14,6 +14,14 @@ export interface ShellStateDto {
   memoryDir: string | null;
   /** 应用自己的数据（缓存、运行时记录），卸载可删。 */
   dataDir: string | null;
+  /**
+   * 模型状态。分开报「有没有模型路由」和「有没有密钥」，
+   * 因为这两种缺失的修法完全不同，含糊成一句「不可用」等于什么都没说。
+   */
+  model: {
+    ref: string | null;
+    keyPresent: boolean;
+  };
   failure: {
     kind: string;
     retryable: boolean;
@@ -22,9 +30,24 @@ export interface ShellStateDto {
   } | null;
 }
 
+export interface ChatTurnDto {
+  role: "user" | "assistant" | "system";
+  content: string;
+}
+
+export type ChatResult =
+  | { ok: true; text: string }
+  | { ok: false; kind: "auth" | "endpoint" | "engine" | "network" | "aborted"; message: string };
+
 export interface ShellApi {
   getState(): Promise<ShellStateDto & { logs: string[] }>;
   restartEngine(): Promise<ShellStateDto & { logs: string[] }>;
+  /** 发一句话。流式片段通过 onChunk 推回来，这里只等最终结果。 */
+  sendChat(history: ChatTurnDto[]): Promise<ChatResult>;
+  abortChat(): void;
+  onChunk(cb: (delta: string) => void): void;
+  /** 保存模型密钥并重启引擎（环境变量只在 spawn 时注入，改完必须重启）。 */
+  setModelKey(key: string): Promise<ShellStateDto & { logs: string[] }>;
   /** 记忆根（文档目录下）。用户备份的就是这个文件夹。 */
   openMemoryDir(): Promise<string>;
   /** 人格与记忆所在的 workspace。 */
@@ -47,6 +70,12 @@ export interface ShellApi {
 const api: ShellApi = {
   getState: () => ipcRenderer.invoke("shell:get-state"),
   restartEngine: () => ipcRenderer.invoke("shell:restart-engine"),
+  sendChat: (history) => ipcRenderer.invoke("chat:send", history),
+  abortChat: () => ipcRenderer.send("chat:abort"),
+  onChunk: (cb) => {
+    ipcRenderer.on("chat:chunk", (_event, delta: string) => cb(delta));
+  },
+  setModelKey: (key) => ipcRenderer.invoke("model:set-key", key),
   openMemoryDir: () => ipcRenderer.invoke("shell:open-memory-dir"),
   openWorkspace: () => ipcRenderer.invoke("shell:open-workspace"),
   openDataDir: () => ipcRenderer.invoke("shell:open-data-dir"),

@@ -164,6 +164,30 @@ Gateway 暴露三对**无需鉴权**的检查端点（`docs/gateway/health.md`�
 2. **不要经 shell spawn。** 走 `sh -c` 会让 SIGTERM 只送到 shell，Gateway 留在后台（上游文档明确警告过这种 wrapper 的后果）。直接 spawn `node`，信号才直达。
 3. **不要自己实现单实例锁。** 上游已有 file lock + 进程身份守卫（`docs/gateway/gateway-lock.md`，锁在 `$OPENCLAW_STATE_DIR/tmp/openclaw-<uid>/state.<hash>.lock`）。壳要做的是**认这个锁并翻译它的报错**，不是另造一套。
 
+### 3.6 对话怎么走（D027，2026-11-17 实跑）
+
+```text
+界面 → preload → 主进程 chat:send
+                 ├─ 读 userData/secrets.json → spawn 引擎时注入 DEEPSEEK_API_KEY
+                 ├─ 从 openclaw.json 读网关 token
+                 └─ POST /v1/chat/completions
+                      Authorization: Bearer <token>
+                      x-openclaw-session-key: hundun-main   ← 「记不记得你」靠这一个头
+                      { model: "openclaw/default", messages, stream: true }
+                    ↓ SSE：choices[0].delta.content
+                 ← 逐片 chat:chunk 回渲染层，界面一边收一边往外冒字
+```
+
+**三个必须记住的点**：
+
+1. **端点默认关闭。** 不开 `gateway.http.endpoints.chatCompletions.enabled`，连 `/v1/models` 都是 404——很容易误判成「版本不支持这个功能」。
+2. **`x-openclaw-session-key` 不能随机。** 不带它，每个请求都是一个全新会话，也就是每次说话它都是第一次见你。产品命题「被记住」（D011）在技术上就落在这一个头上。
+3. **结束不一定有 `[DONE]`。** 必须同时认 `finish_reason` 与流关闭，只等 `[DONE]` 会挂到超时。
+
+**错误分类比错误文案重要**：缺 key / 缺模型路由 / 引擎没起来，三种失败的修法完全不同。所以 `chat:send` 不抛异常，返回 `{ ok, kind, message }`，界面按 kind 给不同提示。实测踩过一次：引擎把 `Inline API key ... is temporarily disabled after a provider auth/billing failure` 塞在 200 的流里，如果只按 HTTP 状态码判，会被归类成「引擎坏了」——用户就会去重启引擎，而正确动作是换 key。**看到「鉴权」字样的文案，一律归 auth，不看状态码。**
+
+**凭据不进配置文件**：`openclaw.json` 里的 `apiKey` 写的是 `${DEEPSEEK_API_KEY}` 插值，真实值在 `userData/secrets.json`（0600），只在 spawn 那一刻进环境变量。配置那份文件用户随时会打开、会截图。
+
 ## 4. 收尾流程
 
 ### 4.0 关窗口 ≠ 退出（D026，2026-11-13 修订）

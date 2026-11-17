@@ -6,10 +6,9 @@
  * AI 回复不用气泡（像日记不像聊天工具）。**只复用视觉，不复用它的数据通路**——
  * 那个项目直连模型 API，这里连的是本地 Gateway。
  *
- * 这一版刻意**不能对话**：OpenAI 兼容 HTTP 的配置键还没核实，写错键会让引擎以 78
- * 退出。界面上如实说「还没接」，而不是先做一个假的输入框骗人。
+ * 对话走主进程的 `chat:send`：渲染层不该知道 token 和端口，也不该自己去连 HTTP。
  */
-import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
+import { ref, computed, onMounted, onBeforeUnmount, nextTick } from 'vue'
 
 // logo 的唯一源是 public/logo.svg，构建时原样拷进 dist/renderer/。
 // 走变量而不是字面量：窗口用 file:// 加载，相对路径按当前文档解析才对。
@@ -23,12 +22,35 @@ const state = ref({
   notice: null,
   memoryDir: null,
   dataDir: null,
+  model: { ref: null, keyPresent: false },
   failure: null
 })
 const logs = ref([])
 const view = ref('chat')
 const restarting = ref(false)
 const toast = ref('')
+const scroller = ref(null)
+
+/**
+ * 对话历史。**这份就是发给模型的全部上下文**——不额外维护一份「主进程版」，
+ * 免得界面显示的和实际发出去的悄悄分叉。
+ */
+const turns = ref([])
+const draft = ref('')
+const sending = ref(false)
+const chatError = ref('')
+
+/** 能不能说话：引擎就绪 + 有模型 + 有密钥。缺哪一样要说清是哪一样。 */
+const canSend = computed(
+  () => state.value.status === 'ready' && Boolean(state.value.model?.ref) && Boolean(state.value.model?.keyPresent)
+)
+
+const blockedReason = computed(() => {
+  if (state.value.status !== 'ready') return '引擎还没起来。'
+  if (!state.value.model?.ref) return '还没配模型。设置页填一个 API Key 就会自动配好。'
+  if (!state.value.model?.keyPresent) return '还缺 API Key，设置页里填一下。'
+  return ''
+})
 
 const STATUS_LABEL = {
   booting: '正在准备',
@@ -67,12 +89,15 @@ const opening = computed(() => {
   if (s.status === 'stopped') {
     return { lead: '它停下了。', lines: ['可以在这里重新叫它起来。'] }
   }
+  if (blockedReason.value) {
+    return {
+      lead: '我已经在这儿了。',
+      lines: [blockedReason.value, '引擎跑在端口 ' + (s.port ?? '—') + '。']
+    }
+  }
   return {
     lead: '我已经在这儿了。',
-    lines: [
-      '引擎跑在端口 ' + (s.port ?? '—') + '。',
-      '但现在还不能跟你说话——对话接口还没接上。这一版先把壳做对，慢一点也比假装能聊强。'
-    ]
+    lines: ['说点什么吧。想说什么都行，没什么可说的也可以只发一个标点。']
   }
 })
 
@@ -132,11 +157,103 @@ async function openData() {
 const minimize = () => window.shellApi.winMinimize()
 const closeWin = () => window.shellApi.winClose()
 
+function scrollToEnd() {
+  nextTick(() => {
+    if (scroller.value) scroller.value.scrollTop = scroller.value.scrollHeight
+  })
+}
+
+/**
+ * 发一句话。
+ *
+ * 历史一起发上去（不靠引擎侧记住上下文）：这样「清空对话」只是清这里，
+ * 不会出现界面空了、模型还记着上一段的情况。
+ * 记忆的连续性由会话 key 保证——那是另一层，见 main.ts 的 SESSION_KEY。
+ */
+async function send() {
+  const text = draft.value.trim()
+  if (text.length === 0 || sending.value) return
+  if (!canSend.value) {
+    flash(blockedReason.value || '还不能说话')
+    return
+  }
+
+  chatError.value = ''
+  draft.value = ''
+  turns.value.push({ role: 'user', content: text })
+  // 先占一个空的助手位，流式片段往它身上追加，用户能立刻看到字在往外冒
+  turns.value.push({ role: 'assistant', content: '' })
+  sending.value = true
+  scrollToEnd()
+
+  try {
+    const result = await window.shellApi.sendChat(
+      turns.value.map((t) => ({ role: t.role, content: t.content })).slice(0, -1)
+    )
+    if (result.ok) {
+      // 用最终结果对齐一次：流式拼接可能因为丢块而不完整
+      turns.value[turns.value.length - 1].content = result.text
+    } else {
+      turns.value.pop() // 丢掉空的助手位
+      chatError.value = result.message
+      if (result.kind === 'auth') {
+        chatError.value += '（设置页填 API Key）'
+      }
+    }
+  } catch (error) {
+    turns.value.pop()
+    chatError.value = String(error?.message || error)
+  } finally {
+    sending.value = false
+    scrollToEnd()
+  }
+}
+
+function onKeydown(event) {
+  if (event.key === 'Enter' && !event.shiftKey) {
+    event.preventDefault()
+    void send()
+  }
+}
+
+function stop() {
+  window.shellApi.abortChat()
+}
+
+const keyInput = ref('')
+const savingKey = ref(false)
+
+async function saveKey() {
+  if (savingKey.value) return
+  const key = keyInput.value.trim()
+  if (key.length === 0) {
+    flash('先填一个 Key')
+    return
+  }
+  savingKey.value = true
+  try {
+    applyState(await window.shellApi.setModelKey(key))
+    keyInput.value = ''
+    flash('已保存，引擎正在用新钥匙重启')
+  } catch (error) {
+    flash('保存失败：' + (error?.message || error))
+  } finally {
+    savingKey.value = false
+  }
+}
+
 onMounted(async () => {
   window.shellApi.onState((s) => applyState(s))
   window.shellApi.onLog((line) => {
     logs.value.push(line)
     if (logs.value.length > 300) logs.value.shift()
+  })
+  // 流式片段：往最后一个助手位上追加。不重新赋值数组，避免整列重绘
+  window.shellApi.onChunk((delta) => {
+    const last = turns.value[turns.value.length - 1]
+    if (!last || last.role !== 'assistant') return
+    last.content += delta
+    scrollToEnd()
   })
   await refresh()
   // 兜底轮询：IPC 事件丢了也不至于界面永远停在旧状态
@@ -234,7 +351,7 @@ onBeforeUnmount(() => {
         <div ref="scroller" class="messages">
           <div class="hx-day">今天</div>
 
-          <div class="msg">
+          <div v-if="turns.length === 0" class="msg">
             <div class="avatar">
               <img :src="LOGO" alt="馄饨" draggable="false" />
             </div>
@@ -245,18 +362,42 @@ onBeforeUnmount(() => {
             </div>
           </div>
 
+          <template v-for="(turn, i) in turns" :key="i">
+            <!-- 用户说的话靠右，用气泡；它说的话不用气泡（像日记不像聊天工具） -->
+            <div v-if="turn.role === 'user'" class="msg me">
+              <div class="content">
+                <div class="bubble">{{ turn.content }}</div>
+              </div>
+            </div>
+            <div v-else class="msg">
+              <div class="avatar">
+                <img :src="LOGO" alt="馄饨" draggable="false" />
+              </div>
+              <div class="content hx-reply">
+                <p v-if="turn.content.length === 0" class="hx-typing">…</p>
+                <p v-else>{{ turn.content }}</p>
+              </div>
+            </div>
+          </template>
+
+          <div v-if="chatError" class="notice bad">{{ chatError }}</div>
           <div v-if="state.notice" class="notice">{{ state.notice }}</div>
         </div>
 
         <div class="composer">
           <div class="composer-inner">
             <textarea
+              v-model="draft"
               rows="1"
-              disabled
-              placeholder="对话还没接上"
+              :disabled="!canSend || sending"
+              :placeholder="canSend ? '说点什么…' : blockedReason"
               spellcheck="false"
+              @keydown="onKeydown"
             />
-            <button class="send" disabled>说</button>
+            <button v-if="sending" class="send" title="停下" @click="stop">停</button>
+            <button v-else class="send" :disabled="!canSend || draft.trim().length === 0" @click="send">
+              说
+            </button>
           </div>
           <div class="hint">
             <span>Enter 发送 · Shift+Enter 换行</span>
@@ -299,12 +440,37 @@ onBeforeUnmount(() => {
 
         <div class="hx-block">
           <div class="hx-block-head">
-            <span class="hx-block-title">对话</span>
-            <span class="hx-chip off">未接通</span>
+            <span class="hx-block-title">模型</span>
+            <span class="hx-chip" :class="canSend ? 'ready' : 'off'">
+              {{ canSend ? '可以说话' : '还不能说话' }}
+            </span>
+          </div>
+          <div class="hx-kv">
+            <span>模型</span><code>{{ state.model?.ref ?? '未配置' }}</code>
+          </div>
+          <div class="hx-kv">
+            <span>API Key</span><code>{{ state.model?.keyPresent ? '已保存' : '未填写' }}</code>
+          </div>
+          <div class="hx-row">
+            <input
+              v-model="keyInput"
+              class="hx-input"
+              type="password"
+              placeholder="粘贴 API Key，例如 sk-…"
+              spellcheck="false"
+              @keydown.enter.prevent="saveKey"
+            />
+            <button class="hx-btn" :disabled="savingKey || keyInput.trim().length === 0" @click="saveKey">
+              {{ savingKey ? '保存中…' : '保存并重启' }}
+            </button>
           </div>
           <p class="hx-note">
-            这一版只做好了引擎的启动、就绪与收尾。对话收发要等 OpenAI 兼容接口的配置键核实后再接——
-            写错一个键会让引擎以「配置无效」退出，比不做更糟。
+            Key 存在应用数据目录（权限 0600），<strong>不在记忆目录里</strong>——记忆目录会被导出成 zip、也可能被云同步，
+            钥匙不该跟着走。保存后引擎会重启一次，因为凭据是在启动那一刻注入进程环境的。
+          </p>
+          <p class="hx-note">
+            模型走 OpenAI 兼容接口（<code>POST /v1/chat/completions</code>）。这个端点在引擎里<strong>默认关闭</strong>，
+            首次启动时已由我们写进配置打开。
           </p>
         </div>
 
