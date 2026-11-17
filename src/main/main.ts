@@ -503,8 +503,14 @@ function registerIpc(): void {
    * 渲染层全程摸不到明文。只发一个只读请求；拉到什么就填什么，拉不到把手写权留给用户。
    */
   ipcMain.handle("model:probe", async (_event, payload: { config: unknown; providerId?: string }) => {
-    const { config, providerId } = payload || {};
-    const { config: opencode } = ensureOpencode(config);
+    const { providerId } = payload || {};
+    // 与 model:edit 一样兼容两种入参：JSON 字符串或已解析对象
+    let raw: unknown = payload?.config;
+    if (typeof raw === "string") {
+      try { raw = JSON.parse(raw); }
+      catch { return { ok: false, models: [], error: "JSON 语法错误" }; }
+    }
+    const { config: opencode } = ensureOpencode(raw);
     // 与 apply 同一套占位符解析：env 先看进程环境，再回退 secrets.json——
     // apply 过一次之后真值就住在 secrets 里，不在进程环境里。
     const secrets = await readSecrets(requirePaths().dataDir);
