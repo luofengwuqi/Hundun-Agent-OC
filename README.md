@@ -41,8 +41,8 @@
 - 尚未确定：**Q 清单已归零；开放冲突 0 项**。剩余待办全在 O 清单：O02 模型凭据、O05 安全层缺口、O06 仓库前置、O07 极端情况求助渠道、O12 打包是否裁 docs、**O13 导出记忆 / O14 同步盘风险 / O15 三平台托盘是否统一 / O16 手机接入开关**
 - 外部缺件与签认项：见 `docs/DECISIONS.md` 的 O 编号清单
 - **开放冲突 0 项**：X01（主动开口）已裁决为「每天一次、时间不固定、可开关」（D014）；X02（与 hundunAgent 的定位）已裁决（D012）
-- **下一步**：① 前端按 D025 换成 Vue 3 + hundunAgent 视觉；② 接对话收发（需先核实 OpenAI 兼容 HTTP 接口的配置键，写错键会让引擎以 78 退出）。第一版刻意不接，界面上明说「还没接」而不是假装能聊
-- 一句话现状：**壳能起引擎、能看状态、能干净收尾，记忆落点已确保卸载不丢**；对话这条主链路还没接上，是眼下唯一的实质性缺口
+- **下一步**：① 托盘常驻（D026 的剩余部分：关窗隐藏 + 托盘点退出才真退，含 O15 三平台一致性）；② 接对话收发（需先核实 OpenAI 兼容 HTTP 接口的配置键，写错键会让引擎以 78 退出）。**顺序不能倒**：先托盘再对话，否则接完对话用户一关窗，主动关心仍然触发不了
+- 一句话现状：**壳已经是馄饨的样子了**（Vue 3 + 奶油白朱红），引擎能起能停、记忆落在卸载不丢的位置；**但还不能说话**，对话是眼下唯一的实质缺口
 
 ## 已核实的上游事实（不是本项目的选型决策）
 
@@ -110,12 +110,21 @@ hundun-agent-oc/
 │   │       ├── supervise.ts        # spawn / 就绪探测 / 停止 / 接管孤儿
 │   │       └── errors.ts           # 退出码 → 分类 → 用户可读文案
 │   ├── preload/index.ts            # contextBridge 白名单，不暴露 token / fs / 裸 ipcRenderer
-│   └── renderer/                   # 状态页（index.html + app.js），对话界面待接
+│   └── renderer/                   # Vue 3 前端（D025）
+│       ├── index.html              # <!--BUNDLE--> 占位，构建时替换成 assets 引用
+│       ├── public/                 # logo.svg、icon.png，原样拷进 dist
+│       └── src/
+│           ├── main.js             # createApp(App).mount
+│           ├── App.vue             # 外壳 + 对话列 + 设置页
+│           ├── styles.css          # 视觉基线（前 2040 行来自参考项目 + hx- 追加）
+│           └── markdown.js         # 极简 markdown（对话渲染用）
 ├── scripts/
-│   ├── build.mjs                   # tsc + 拷渲染层
+│   ├── build.mjs                   # 两段：tsc(main/preload) + esbuild(renderer, 含 .vue 编译)
 │   ├── dev-launch.mjs              # 开发期启动器：处理宿主 IDE 的 Electron 环境坑
+│   ├── dev-shot.mjs                # CDP 截图，改完 UI 用它验渲染（npm run shot）
 │   ├── dev-engine-smoke.mjs        # 引擎生命周期冒烟（起→就绪→收尾→断言无孤儿）
-│   └── probe-electron-runtime.mjs  # 早期诊断脚本（G06 授权），判断 Electron 能否承载引擎
+│   ├── launch-desktop.sh           # 一键启动：选合格 node、验依赖与引擎、构建、启动（桌面入口调用它）
+│   └── probe-electron-runtime.mjs  # 早期诊断脚本（G06 授权）
 └── docs/
     ├── PROJECT_PLAN.md
     ├── DECISIONS.md
@@ -131,11 +140,14 @@ hundun-agent-oc/
 npm install          # 若 Electron 二进制没下下来：ELECTRON_MIRROR=https://npmmirror.com/mirrors/electron/ node node_modules/electron/install.js
 npm run smoke        # 只验引擎生命周期，不开窗口，适合 CI
 npm start            # 构建 + 开窗口
+npm run shot -- --out /tmp/a.png   # 给运行中的窗口截图（另开终端跑，验渲染用）
 ```
 
 `npm start` 走 `scripts/dev-launch.mjs` 而不是直接 `electron .`，这是有原因的：它会摘掉宿主注入的 `ELECTRON_RUN_AS_NODE`、忽略不适用的 `NODE_OPTIONS`、在 Linux 上发现 SUID 沙箱不可用时降级 `--no-sandbox` 并打印修法。直接 `electron .` 在 VS Code / Cursor 这类终端里会以 `Cannot read properties of undefined (reading 'whenReady')` 崩掉——那**不是代码问题**，详见 `docs/SHELL-SKELETON.md` §8.2。
 
-`.workbuddy/memory/` 尚未在本项目创建；它是换机恢复约定中要单独带走的本地记忆目录，见 `docs/DECISIONS.md` 00 节。
+**前端现状（D025）**：Vue 3，视觉基线取自 `/home/wuqi/code/hundunAgent`。构建分两段——主进程走 `tsc`（保类型检查），渲染层走 `esbuild + @vue/compiler-sfc`（不用 Vite：本机内存受限时 Vite 会 OOM）。**这一版刻意不能对话**，输入框是禁用的，页面上明说原因。
+
+`.workbuddy/memory/` 是本项目的本地工作日志（`2026-11-13.md` 起），`.gitignore` 已排除——换机时需手动带走，见 `docs/DECISIONS.md` 00 节。
 
 ## 脚手架里替你定的技术默认
 

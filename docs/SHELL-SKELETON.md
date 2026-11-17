@@ -28,22 +28,28 @@ hundun-agent-oc/
 ├── package.json                   # ✔ main 指向 dist/main/main.js
 ├── tsconfig.json                  # ✔ ES2022 / CommonJS / strict
 ├── scripts/
-│   ├── build.mjs                  # ✔ tsc + 拷渲染层（用 node fs 而非 cp，兼容 Windows）
+│   ├── build.mjs                  # ✔ 两段：tsc(main/preload) + esbuild(renderer, 含 .vue 编译)
 │   ├── dev-launch.mjs             # ✔ 开发期启动器，摘掉宿主 IDE 注入的 Electron 环境变量（§8.2）
+│   ├── dev-shot.mjs               # ✔ 通过 CDP 给运行中的窗口截图（改 UI 后验渲染）
 │   └── dev-engine-smoke.mjs       # ✔ 引擎生命周期冒烟：起→就绪→收尾→断言无孤儿
 ├── src/
 │   ├── main/                      # Electron 主进程
-│   │   ├── main.ts                # ✔ app 生命周期、窗口、IPC（ipc 先并入此文件）
+│   │   ├── main.ts                # ✔ app 生命周期、无边框窗口、IPC（ipc 先并入此文件）
 │   │   └── engine/
-│   │       ├── paths.ts           # ✔ userData → OPENCLAW_HOME 映射（唯一事实源，不 import electron）
+│   │       ├── paths.ts           # ✔ 记忆根/应用数据的唯一事实源（不 import electron）
 │   │       ├── port.ts            # ✔ 空闲端口探测（base 18890，避开 18789）
 │   │       ├── config.ts          # ✔ 生成 openclaw.json（D021 工具策略在此落地）
 │   │       ├── supervise.ts       # ✔ spawn / 就绪探测 / 退出 / 接管
 │   │       └── errors.ts          # ✔ 退出码 → 用户可读文案
 │   ├── preload/index.ts           # ✔ contextBridge 白名单（不暴露 token / fs / 裸 ipcRenderer）
-│   └── renderer/                  # 现状：纯 HTML/JS 状态页；目标：Vue 3（D025）
-│       ├── index.html
-│       └── app.js
+│   └── renderer/                  # ✔ Vue 3（D025）
+│       ├── index.html             # 含 <!--BUNDLE--> 占位，构建时替换成 assets 引用
+│       ├── public/                # logo.svg、icon.png，原样拷进 dist
+│       └── src/
+│           ├── main.js            # createApp(App).mount
+│           ├── App.vue            # 外壳 + 对话列 + 设置页
+│           ├── styles.css         # 视觉基线（前 2040 行来自参考项目，之后是 hx- 追加）
+│           └── markdown.js        # 极简 markdown（对话渲染用）
 ├── engine/                        # 【只读】打包进安装包，运行时不得写  [计划]
 │   ├── node/bin/node              # D023：私有 Node，每平台一份
 │   └── openclaw/                  # npm 包原样内容（dist/ + 根级 .mjs + 许可）
@@ -198,6 +204,33 @@ Gateway 暴露三对**无需鉴权**的检查端点（`docs/gateway/health.md`�
 
 `SIGINT` / `SIGTERM` 会停止进程（上游如此）。但**前提是信号真的送到了 node 进程**——见 §3.5 第 2 条。若壳被 `kill -9`，引擎会成为孤儿；`OPENCLAW_HOME` 指向 app 目录的好处是，下次启动能明确识别「这是我家那个孤儿」，而不是一个来历不明的进程。
 
+**实测补充（2026-11-17）：托盘常驻后，Electron 主进程可能对 `SIGTERM` 无响应。** 开发期清理实例时遇到过一例：`kill -TERM` 后进程（pid 38503）继续存活、端口不释放，最终靠 `kill -9` 收掉。
+
+这不是托盘的 bug，而是「托盘应用对外部信号没有强制退出契约」的固有现象——macOS 上关不掉的是菜单栏应用，Linux 上则取决于窗口是否真的在销毁。**因此开发脚本清理实例时不要只发 SIGTERM 就认为干净了，要「发信号 → 等 → 复查 pid → 不通则 `kill -9`」**，否则下一个实例会撞上单实例锁或状态目录占用，表现为「启动没反应」。
+
+用户层面无需处理（用户走托盘菜单「退出」，那是应用内部路径，已验证可靠）。
+
+### 4.4 托盘四项验收（2026-11-17 实跑记录）
+
+D026 定了四条行为，全部在实机上跑过，不是「代码看起来对」：
+
+| # | 验收项 | 怎么验的 | 结果 |
+| --- | --- | --- | --- |
+| 1 | 点关闭 → 只隐藏，引擎不退 | CDP 触发 `winClose()`，再查 pid 与端口 | ✅ Electron 存活、引擎继续监听 18890 |
+| 2 | 托盘「退出」→ 真退出，无孤儿 | 开发期专用 IPC `devQuit()`（`!app.isPackaged` 才注册） | ✅ Electron 与引擎双双退出、18890 释放、零残留 |
+| 3 | 单实例锁：第二次启动叫回原窗口 | 再跑一次启动器，查两处 | ✅ 第二实例退出码 0、原实例存活、`gateway run` 精确 1 个 |
+| 4 | 窗口被叫回后可见 | CDP 查 `document.visibilityState` | ✅ `visible` |
+
+**为什么单实例锁是必需项而不是加分项**：托盘常驻后，用户双击图标时应用通常已在跑。没有锁 → 两个 Electron 各 spawn 一个引擎抢同一个状态目录 → 第二个必然失败，且失败方式取决于竞争时序（可能是「配置无效」退出码 78，可能是端口占用），**症状随机，最难排查**。锁必须在 `app.whenReady()` 之前拿。
+
+**`forceQuit` / `before-quit` 的配合是这条路径最容易写反的地方**：
+
+- `close` 事件里若不看 `forceQuit`，`app.quit()` 会被自己的拦截挡回去 → **点了退出没反应**；
+- `before-quit` 里若不设 `quitting` 标志，第二次 `app.quit()` 又会进 `preventDefault` → **死循环，退出时卡住**；
+- 反过来若 `before-quit` 直接放行（不 stop 引擎）→ **退出把引擎丢成孤儿**，下次启动撞孤儿检测。
+
+三种错法对应三种完全不同的症状，所以这条必须留自动化入口验证，而不是「读一遍觉得对」。该 IPC 只在非打包时注册，发行版里不存在。
+
 ## 5. 与已定决策的映射
 
 | 决策 | 落在壳的哪里 |
@@ -278,6 +311,65 @@ reason=Blocked: resolves to private/internal/special-use IP address
 ```
 
 这是上游的 SSRF 防护在起作用——本机 DNS 把这两个域名解析到了私有/内网地址（网络环境所致，不是配置错）。影响面：**模型目录与插件市场的在线拉取会失败**；不影响已配置凭据的对话。真要接在线目录时得先处理这条，否则会被误判成「代码没写对」。
+
+### 8.5 前端迁移到 Vue（2026-11-17，D025 落地）
+
+**做了什么**：渲染层从手写 HTML/JS 换成 Vue 3，视觉基线整份取自参考项目 `hundunAgent`（奶油白 `#fff8e8` + 朱红 `#c3272b`，左侧窄图标栏，AI 回复不用气泡）。样式前 2040 行是参考项目的 `styles.css` 原样拷入，之后追加 `hx-` 前缀的本项目样式——**前缀是为了将来同步参考项目样式时不撞名**。
+
+**构建为什么要两段**：主进程/preload 继续走 `tsc`（保住严格类型检查），渲染层走 `esbuild + @vue/compiler-sfc`。不用 Vite 的原因不是偏好——参考项目在同一台机器上踩过：Node 虚拟内存受限时 Vite 加载会触发 undici 的 WASM 初始化直接 OOM。esbuild 是原生二进制，`@vue/compiler-sfc` 是纯 JS，都不碰 WASM。
+
+产物：`dist/renderer/assets/app.js` 256 KB（含 Vue runtime）、`app.css` 36 KB。
+
+**实测结果**（`npm run shot` 截图 + CDP 查 DOM）：
+
+- 对话页：`.chat-col` 954×652 可见、`.hx-set` `display:none`、左栏「对话」高亮。
+- 设置页：五块内容正常，记忆目录显示 `/home/wuqi/文档/馄饨Agent-OC`。
+- 退出：端口释放、引擎退出、`Render frame was disposed` **0 次**（上一轮修的 `sendToWindow` 在新前端上依然有效）。
+- Vue 警告 **0 条**。
+
+**一条被实机证实的纪律**：`app.getPath("documents")` 在本机返回的是 **`/home/wuqi/文档`**，不是 `~/Documents`——系统的 XDG 目录名是本地化的。这条实测把 D024 里「不许手拼 `~/Documents`」从推断变成了证据：手拼的代码在这台机器上会直接找不到目录。
+
+**这一版刻意不能对话**：输入框 `disabled`，占位符写「对话还没接上」，页面上明说原因。**不做一个能打字但发不出去的假输入框**——那比不做更让人恼火。
+
+**与 D026 的偏差（已补齐，2026-11-17）**：迁移当时关闭按钮走的还是 `close()` → 退出、不是 `hide()`，因为托盘没做、藏起来就找不回来。托盘实现后两处一起换掉了，验收记录见 §4.4。
+
+### 8.6 一次「假故障」——验证方式自己制造了崩溃（2026-11-17）
+
+这一条记的不是代码，是**方法**。它是本轮最贵的教训。
+
+**现象**：应用启动约 20–50 秒后自行消失，日志以这句话结尾：
+
+```text
+[pid] ERROR:content/common/zygote/zygote_communication_linux.cc:313] Failed to send GetTerminationStatus message to zygote
+[pid] ERROR:content/browser/network_service_instance_impl.cc:652] Network service crashed or was terminated, restarting service.
+[pid] ERROR:content/browser/gpu/gpu_process_host.cc:1038] GPU process launch failed: error_code=1002
+[pid] FATAL:content/browser/gpu/gpu_data_manager_impl_private.cc:389] GPU process isn't usable. Goodbye.
+```
+
+配合启动时就存在的两条警告（`--ozone-platform=wayland is not compatible with Vulkan`、`vaInitialize failed`），整条序列看上去**铁证如山**：Wayland + Vulkan 不兼容 → GPU 进程崩溃 → Chromium 处决整个应用。对托盘常驻应用来说这是最坏故障，于是加了 `app.disableHardwareAcceleration()`。
+
+**它是错的。** 做了两处对照才发现：
+
+| 变量 | 结果 |
+| --- | --- |
+| `nohup … &` 起实例 + 不停操作 | 约 20–50s 后必现上面那段 FATAL |
+| `nohup … &` 起实例 + 完全闲置 70s | 存活（看似是「被操作」触发） |
+| 受管后台任务起实例 + 连打三次截图 | 存活，`FATAL` 计数 0 |
+| 同上，**并显式打开硬件加速** | 同样存活，`FATAL` 计数 0、`GPU process launch failed` 计数 0 |
+
+**真正的原因**：`nohup … &` 起的进程仍在工具链的进程树里，调用结束前后被收割。收割顺序恰好是 **zygote 先死**，于是 network service 与 GPU 进程跟着死，Chromium 在「子进程大面积消失」时打出 `GPU process isn't usable`——**这条 FATAL 是结果，不是原因**。症状真实，归因完全错了。
+
+**三条可复用的判断**：
+
+1. **看到「原因」比你预期的时序更整齐时，先怀疑验证装置。** 真正的驱动故障不会每次都精准落在你去戳它的那一刻。
+2. **必须做对照实验，而且是关掉嫌疑变量的那一边。** 我一开始只做了「加兜底后还死不死的单边验证」，那是无效验证——单边验证只能证明「某个改动没救活它」，不能证明「原故障与它有关」。
+3. **FATAL 里出现「多个不相关子系统同时失败」（zygote + network + GPU），指向外部收割，不指向某个驱动。** 一个子系统坏不会带走另外两个。
+
+**另一个同源的假象**：某次首帧截图里 logo 与头像是破图（`naturalWidth = 0`），刷新后恢复正常。**这条归因现在待定，我原本写在这里的解释很可能是错的。** 原本的推断是命令写法（末尾的 `&` 把整条 `build && launch` 链放进了后台）让页面在资源没拷完时加载；但同一时段 `logo.svg` 本身有个致命缺陷——XML 注释里写了 `--accent` / `--bg` 这种双连字符，整份 SVG 解析失败，`<img>` 静默变断图且控制台无报错——是另一路修好并重建的，所以我那次破图更可能读到的是**修复前的旧资源**。
+
+能当结论用的只有一条：`&` 不要加在整条命令链上，构建与启动必须严格串行。至于破图的真正原因——**XML 注释里不允许出现 `--`**，在 SVG 上尤其阴，因为它不报错、只是静默不渲染。
+
+**结论**：`disableHardwareAcceleration()` 已撤，代码里留了注释说明为什么不能加回去。真实存在的只有一条非致命警告（Wayland 上 Vulkan 不兼容导致合成回退），不影响使用；要治应该去查驱动，不该在壳里永久关 GPU 来掩盖。
 
 ## 9. 本文档的边界
 
