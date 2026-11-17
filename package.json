@@ -9,12 +9,18 @@
     "build": "node scripts/build.mjs",
     "start": "npm run build && node scripts/dev-launch.mjs",
     "smoke": "node scripts/dev-engine-smoke.mjs",
+    "shot": "node scripts/dev-shot.mjs",
     "pack": "npm run build && electron-builder"
   },
   "devDependencies": {
     "@types/node": "^24.9.0",
+    "@vue/compiler-sfc": "^3.5.45",
     "electron": "^45.3.1",
     "electron-builder": "^26.18.0",
+    "esbuild": "^0.25.12",
     "typescript": "^5.9.3"
+  },
+  "dependencies": {
+    "vue": "^3.5.45"
   }
 }
