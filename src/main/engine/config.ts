@@ -244,12 +244,12 @@ export async function readModelRef(configPath: string): Promise<string | undefin
  * 否则用户会以为「配好的模型丢了」。这里把引擎格式翻译回界面认识的 provider/chain 形状。
  */
 export async function readSavedProviders(configPath: string): Promise<{
-  providers: Array<{ id: string; name: string; baseUrl: string; hasKey: boolean; models: Array<{ id: string; name: string; context: number }> }>;
+  providers: Array<{ id: string; name: string; baseUrl: string; api: string; hasKey: boolean; envName: string | null; models: Array<{ id: string; name: string; context: number }> }>;
   primaryRef: string | null;
 }> {
   const { json } = await readJsonIfPresent(configPath);
   const models = json?.models;
-  const providers: Array<{ id: string; name: string; baseUrl: string; hasKey: boolean; models: Array<{ id: string; name: string; context: number }> }> = [];
+  const providers: Array<{ id: string; name: string; baseUrl: string; api: string; hasKey: boolean; envName: string | null; models: Array<{ id: string; name: string; context: number }> }> = [];
   if (isObject(models)) {
     const provNode = models.providers;
     if (isObject(provNode)) {
@@ -259,11 +259,16 @@ export async function readSavedProviders(configPath: string): Promise<{
         const modelList = Array.isArray(conf.models)
           ? (conf.models as Array<Record<string, unknown>>)
           : [];
+        // apiKey 只会是 ${ENV} 插值（明文在 secrets.json）。把名字抽出来，
+        // 反向加载时原样还原——否则重启后密钥引用会指错环境变量。
+        const interp = typeof conf.apiKey === "string" ? conf.apiKey.trim().match(/^\$\{(.+)\}$/) : null;
         providers.push({
           id,
           name: typeof conf.name === "string" && conf.name ? conf.name : id,
           baseUrl,
+          api: typeof conf.api === "string" && conf.api ? conf.api : "openai-completions",
           hasKey: typeof conf.apiKey === "string" && conf.apiKey.length > 0,
+          envName: interp && interp[1] ? interp[1] : null,
           models: modelList.map((m) => ({
             id: typeof m.id === "string" ? m.id : "",
             name: typeof m.name === "string" && m.name ? m.name : (typeof m.id === "string" ? m.id : ""),

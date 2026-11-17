@@ -8,7 +8,7 @@
  *   provider.options.baseURL      → models.providers.<id>.baseUrl（须带 /v1）
  *   provider.options.apiKey       → 判断来源：{env:NAME} → ${NAME} 插值；明文 → 进 secrets
  *   provider.models 的键         → models.providers.<id>.models[].id
- *   api                          → 固定 "openai-completions"
+ *   provider.api                 → 引擎的 api 方言（claude 式是 anthropic-messages，缺省 openai-completions）
  *   链的第一项（首选）           → agents.defaults.model.primary = "provider/model"
  *
  * 密钥纪律（延续 D027，不可改）：
@@ -101,7 +101,9 @@ export function applyModelConfig(
 
     const engineProvider: EngineProvider = {
       baseUrl: p.baseUrl,
-      api: "openai-completions",
+      // api 方言随配置走：claude 式是 anthropic-messages，opencode 式/本地是 openai-completions。
+      // 引擎拼 URL 时自己处理差异（anthropic-messages 会补 /v1/messages）。
+      api: p.api || "openai-completions",
       models: p.models.map((m) => ({ id: m.id, name: m.name })),
     };
 

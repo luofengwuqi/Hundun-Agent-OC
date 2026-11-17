@@ -33,6 +33,12 @@ export interface ProviderEntry {
   baseUrl: string;
   apiKey: string;
   hasKey: boolean;
+  /**
+   * 引擎的 api 方言：openai-completions / anthropic-messages / ……
+   * claude 式配置转出来的是 anthropic-messages，这里透传到引擎配置，
+   * 缺省 openai-completions（opencode 式与本地模型的常态）。
+   */
+  api: string;
   models: ModelEntry[];
 }
 
@@ -143,6 +149,9 @@ export function normalize(raw: unknown, opts: { baseDir?: string; resolveVar?: (
     const apiKey = String(options.apiKey == null ? "" : options.apiKey).trim();
     if (!apiKey) warnings.push(`${id}：没有 apiKey，本地模型没关系，云端服务商这样会 401`);
 
+    // api 方言：claude 式转来的带 anthropic-messages；没写按 openai-completions。
+    const api = String(conf.api == null ? "" : conf.api).trim() || "openai-completions";
+
     const modelNode = (conf.models && typeof conf.models === "object" ? conf.models : {}) as Record<string, unknown>;
     const modelKeys = Object.keys(modelNode);
     if (!modelKeys.length) {
@@ -163,7 +172,7 @@ export function normalize(raw: unknown, opts: { baseDir?: string; resolveVar?: (
       });
     }
 
-    providers.push({ id, name: String(conf.name || id), baseUrl, apiKey, hasKey: Boolean(apiKey), models });
+    providers.push({ id, name: String(conf.name || id), baseUrl, apiKey, hasKey: Boolean(apiKey), api, models });
   }
 
   if (!providers.length && !errors.length) errors.push("provider 段里一个可用的都没有");
@@ -289,4 +298,35 @@ export function removeModel(json: Record<string, unknown>, ref: string): { ok: b
   if (list.length === 1) return { ok: false, error: "至少留一个模型" };
   list.splice(i, 1);
   return { ok: true, config: withOrder(json, list) };
+}
+
+/**
+ * 整体替换某个 provider 的模型列表（探测回来的真实列表写回配置用）。
+ * 顺序：仍然有效的旧条目在前，新条目补在后面——用户排过的序不被一次刷新打乱。
+ */
+export function setProviderModels(
+  json: Record<string, unknown>,
+  providerId: string,
+  models: Array<{ id: string; name?: string }>,
+): { ok: boolean; config?: Record<string, unknown>; error?: string } {
+  const pid = String(providerId || "").trim();
+  const provNode = ((json.provider as Record<string, unknown> | undefined) ?? {})[pid];
+  if (!provNode || typeof provNode !== "object") return { ok: false, error: `配置里没有 ${pid} 这个 provider` };
+  const fresh = models.filter((m) => m && typeof m.id === "string" && m.id.trim());
+  if (!fresh.length) return { ok: false, error: "模型列表是空的" };
+
+  const out = JSON.parse(JSON.stringify(json)) as Record<string, unknown>;
+  const provs = out.provider as Record<string, unknown>;
+  const target = provs[pid] as Record<string, unknown>;
+  const modelNode: Record<string, unknown> = {};
+  for (const m of fresh) modelNode[m.id] = { name: m.name || m.id };
+  target.models = modelNode;
+
+  const known = new Set(fresh.map((m) => `${pid}/${m.id}`));
+  const order = orderOf(out).filter((ref) => {
+    const s = splitRef(ref);
+    return s ? s.providerId !== pid || known.has(ref) : false;
+  });
+  for (const ref of known) if (!order.includes(ref)) order.push(ref);
+  return { ok: true, config: withOrder(out, order) };
 }
