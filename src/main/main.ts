@@ -89,8 +89,20 @@ function createTray(): void {
   // 系统托盘收不了 SVG，Electron 的 Tray 只认位图。
   const iconPath = join(__dirname, "..", "renderer", "tray.png");
   try {
-    const image = nativeImage.createFromPath(iconPath);
-    if (image.isEmpty()) throw new Error(`托盘图标读不出来：${iconPath}`);
+    const raw = nativeImage.createFromPath(iconPath);
+    if (raw.isEmpty()) throw new Error(`托盘图标读不出来：${iconPath}`);
+    /*
+     * 三平台都常驻托盘（O15，2026-11-17 用户确认），但图标尺寸要按平台给：
+     *
+     *   macOS   —— 菜单栏高 22pt，图标习惯 16–18pt。直接塞 32px 会顶出菜单栏、
+     *              上下被裁掉。这里缩到 18（Retina 下略软，但没有 Mac 实测，
+     *              我选择先保证「不被裁」这个会一眼看出来的问题）。
+     *   Windows —— 托盘槽 16px（100% DPI）/ 24（150%）/ 32（200%）。32px 交出去
+     *              由系统按 DPI 缩，效果可以。
+     *   Linux   —— AppIndicator 普遍按 22–24 显示，32px 也能接受。
+     */
+    const image =
+      process.platform === "darwin" ? raw.resize({ width: 18, height: 18 }) : raw;
     tray = new Tray(image);
     tray.setToolTip("馄饨Agent-OC");
     tray.setContextMenu(
@@ -113,8 +125,19 @@ function createTray(): void {
         },
       ]),
     );
-    // Windows / Linux 上单击托盘 = 打开窗口；macOS 上习惯是弹菜单，故不绑
-    if (process.platform !== "darwin") tray.on("click", showWindow);
+    /*
+     * 「点图标」的语义按平台习惯分，不能一刀切：
+     *
+     *   macOS   —— 设了 contextMenu 之后，单击默认就是弹菜单。此时再绑 click 会把
+     *              单击变成「打开窗口」，菜单永远弹不出来，正好和全系统习惯相反。
+     *   Windows —— 单击开窗；另有相当比例的人习惯双击，两个事件都绑。
+     *              showWindow 是幂等的，重复触发不会开出第二个窗口。
+     *   Linux   —— 单击开窗（托盘走 AppIndicator，具体行为随桌面环境略有差异）。
+     */
+    if (process.platform !== "darwin") {
+      tray.on("click", showWindow);
+      if (process.platform === "win32") tray.on("double-click", showWindow);
+    }
   } catch (error) {
     tray = undefined;
     console.error("[tray] 托盘不可用，回退为「关窗即退出」：", error);
@@ -343,6 +366,16 @@ async function createWindow(): Promise<void> {
  *   `'--ozone-platform=wayland' is not compatible with Vulkan`
  * 它只是让合成回退，不影响使用。真要处理，应该是排查驱动，而不是在壳里永久关掉 GPU。
  */
+
+/**
+ * Windows 必须先有 AppUserModelID，否则 `new Notification()` 会被系统静默丢弃。
+ *
+ * 症状很坑：点了关闭、窗口消失、**一条提示都没有**，用户以为程序崩了。
+ * 而「关窗后还在跑」这件事本身就要靠那条提示来交代（D026 的义务），
+ * 所以这不是可选设置，是提示能不能送达的前提。
+ * 打包后安装器一般会写这个值，但开发期和免安装运行都没有，必须显式设。
+ */
+if (process.platform === "win32") app.setAppUserModelId("com.hundun.agent.oc");
 
 /**
  * 单实例锁。托盘常驻之后这条从「锦上添花」变成「必须」：
