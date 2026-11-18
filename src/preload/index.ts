@@ -37,7 +37,7 @@ export interface ChatTurnDto {
 
 export type ChatResult =
   | { ok: true; text: string }
-  | { ok: false; kind: "auth" | "endpoint" | "engine" | "network" | "aborted"; message: string };
+  | { ok: false; kind: "auth" | "endpoint" | "engine" | "network" | "overload" | "aborted"; message: string };
 
 export interface ModelPreviewDto {
   ok: boolean;

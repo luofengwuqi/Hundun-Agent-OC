@@ -27,7 +27,7 @@ export interface ChatOptions {
 export class ChatError extends Error {
   constructor(
     message: string,
-    readonly kind: "auth" | "endpoint" | "engine" | "network",
+    readonly kind: "auth" | "endpoint" | "engine" | "network" | "overload",
   ) {
     super(message);
   }
@@ -42,6 +42,16 @@ function classify(status: number, message: string): ChatError {
     return new ChatError(message, "auth");
   }
   if (status === 404) return new ChatError(message, "endpoint");
+  // 502/503/529 或文案带 overload：上游服务商（或它前面的 Cloudflare）过载。
+  // 2026-11-18 实测：中继 cn.sidrune.ai 的模型后端整个挂了，Cloudflare 报
+  // origin_bad_gateway，引擎统一翻成 "upstream provider overloaded" 甩给界面——
+  // 用户看不懂这句话，会怀疑是自己配置错了。明确说清「不是你的问题、重试即可」。
+  if (status === 502 || status === 503 || status === 529 || /overload/i.test(message)) {
+    return new ChatError(
+      `上游服务商过载了（${status}）。不是你这边的问题，等半分钟再发一次。`,
+      "overload",
+    );
+  }
   return new ChatError(message, "engine");
 }
 
@@ -126,9 +136,15 @@ export async function streamChat(options: ChatOptions): Promise<string> {
           try {
             const frame = JSON.parse(payload) as {
               choices?: { delta?: { content?: string }; finish_reason?: string | null }[];
-              error?: { message?: string };
+              error?: { message?: string; code?: string | number };
             };
-            if (frame.error?.message) throw classify(500, frame.error.message);
+            if (frame.error?.message) {
+              // 实测（2026-11-18）：引擎对外总是 HTTP 200，上游故障塞在流里——
+              // data: {"error":{"message":"upstream provider overloaded","code":"502"}}。
+              // 所以真实状态码在 error.code 里，不是 response.status，别丢。
+              const code = Number(frame.error.code);
+              throw classify(Number.isFinite(code) && code > 0 ? code : 500, frame.error.message);
+            }
             const delta = frame.choices?.[0]?.delta?.content;
             if (typeof delta === "string" && delta.length > 0) {
               answer += delta;
