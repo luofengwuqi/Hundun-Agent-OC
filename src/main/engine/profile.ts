@@ -23,7 +23,7 @@ const USER_FILE = "USER.md";
 const PROFILE_VERSION = 1;
 const MAX_NAME_CHARS = 32;
 
-/** 承认识别「称呼行」的两类写法：带引号的「自称/称呼」、以及「称呼她为 X」。 */
+/** 承认识别「称呼行」的两类写法：带引号的「自称/称呼」、以及「称呼…为 X」。 */
 const NAME_LINE = /^-\s*[^\n]*(?:自称[^\n]*[「『"]|称呼[^\n]*(?:为|叫|作)[^\n]*)/;
 
 export interface PendingName {
@@ -156,7 +156,13 @@ export function parseNameFromUserFile(text: string): string | null {
 }
 
 function canonicalLine(name: string): string {
-  return `- 她自称「${name}」，希望被这样称呼。`;
+  // 用户是无性别的（D033）：这里只能用中性表述。
+  return `- 用户自称「${name}」，希望被这样称呼。`;
+}
+
+function hasCanonicalLine(text: string, name: string): boolean {
+  const canonical = canonicalLine(name);
+  return text.split(/\r?\n/).some((line) => line.trim() === canonical);
 }
 
 /**
@@ -238,8 +244,13 @@ export async function reconcileProfile(paths: EnginePaths): Promise<UserProfile>
 
   const inFile = parseNameFromUserFile(text);
   if (profile.name) {
-    if (inFile !== profile.name) {
-      if (inFile) profile.pending = { name: inFile, observedAt: today(), source: "model-write" };
+    // 名字一致但写法仍是旧的中性化前文案时也要重写一次，
+    // 这样升级后不需要用户手动改档案。
+    const stale = inFile !== profile.name || !hasCanonicalLine(text, profile.name);
+    if (stale) {
+      if (inFile && inFile !== profile.name) {
+        profile.pending = { name: inFile, observedAt: today(), source: "model-write" };
+      }
       const next = rewriteNameLine(text, profile.name);
       if (next !== text) {
         try {

@@ -30,7 +30,6 @@ import {
 import {
   confirmUserName,
   dismissPendingName,
-  ensureProfile,
   getProfileView,
   reconcileProfile,
 } from "./engine/profile";
@@ -818,8 +817,9 @@ app.whenReady().then(async () => {
       isPackaged: app.isPackaged,
     });
     assertPackagedAssets(paths);
-    // 称呼档案：首次启动从 USER.md 迁移已有称呼（旧档案可延续），不阻塞启动。
-    void ensureProfile(paths).catch(() => undefined);
+    // 称呼档案：首次启动从 USER.md 迁移已有称呼（旧档案可延续）；同时把旧的
+    // 性别化写法改写成中性表述。不阻塞启动。
+    void reconcileProfile(paths).catch(() => undefined);
   } catch (error) {
     dialog.showErrorBox(
       "无法启动",
