@@ -89,6 +89,10 @@ function buildEnv(
     // 所以显式钉死，不留猜测空间。
     OPENCLAW_STATE_DIR: paths.stateDir,
     OPENCLAW_CONFIG_PATH: paths.configFile,
+    // 显式钉死 workspace（D031）。引擎在设了 STATE_DIR 时会把 workspace 解析为
+    // state/workspace；这里再给最高优先级的变量，确保壳（重置/仪式/打开文件夹）
+    // 和引擎读写的是同一份人格与记忆，不再出现「重置删空目录」的错位。
+    OPENCLAW_WORKSPACE_DIR: paths.workspace,
     // 让引擎自己起的子进程、以及壳调用的 CLI 都用同一个 Node（D023）。
     // 只在 nodeBinary 是绝对路径时前置，避免开发期把 "." 塞进 PATH。
   };

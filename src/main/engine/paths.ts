@@ -95,9 +95,16 @@ export function resolveEnginePaths(input: ResolveEnginePathsInput): EnginePaths 
 
   return {
     engineHome,
-    workspace: join(engineHome, "workspace"),
-    configFile: join(engineHome, "openclaw.json"),
+    // ⚠️ 必须和引擎解析出的 workspace 是同一个目录（D031 重置失效的根因）。
+    // 引擎 workspace-default-path.ts：设了 OPENCLAW_STATE_DIR 时，
+    // workspace = join(resolveStateDir(env), "workspace") = engineHome/state/workspace。
+    // 之前这里少了一层 state，指向 engineHome/workspace（空目录），导致：
+    //   - 重置记忆删的是空目录，真正的记忆在 state/workspace 纹丝不动；
+    //   - 开发者重置后模型仍记得旧对话。
+    // buildEnv 里另设 OPENCLAW_WORKSPACE_DIR 显式钉死，避免引擎改默认规则时再漂移。
     stateDir: join(engineHome, "state"),
+    workspace: join(engineHome, "state", "workspace"),
+    configFile: join(engineHome, "openclaw.json"),
     dataDir,
     runtimeRecord: join(dataDir, "shell-runtime.json"),
     nodeBinary,
