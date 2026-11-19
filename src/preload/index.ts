@@ -37,10 +37,32 @@ export interface ChatTurnDto {
 
 export type ChatResult =
   | { ok: true; text: string }
-  | { ok: false; kind: "auth" | "endpoint" | "engine" | "network" | "overload" | "aborted"; message: string };
+  | {
+      ok: false;
+      /** invalid：历史被壳侧校验拒了（角色/长度/来源不对），不是引擎的问题。 */
+      kind: "auth" | "endpoint" | "engine" | "network" | "overload" | "aborted" | "invalid";
+      message: string;
+    };
 
 /** 对话历史落盘的结果。失败不打断对话，只带回原因供诊断。 */
 export type ChatHistorySaveResult = { ok: boolean; error?: string };
+
+/** 更正一条 assistant 回复。turns 是写回后的完整历史（以主进程落盘那份为准）。 */
+export type CorrectChatResult =
+  | { ok: true; turns: ChatTurnDto[]; oldContent: string }
+  | { ok: false; error: string };
+
+/** 结构化称呼：pending 是模型提议、尚未被用户确认的值。 */
+export interface UserProfileDto {
+  name: string | null;
+  confirmedAt: string | null;
+  source: "user-confirmed" | "migrated-from-USER.md" | null;
+  pending: { name: string; observedAt: string; source: "model-write" } | null;
+}
+
+export type ConfirmNameResult =
+  | { ok: true; profile: UserProfileDto }
+  | { ok: false; error: string };
 
 export interface ModelPreviewDto {
   ok: boolean;
@@ -88,6 +110,14 @@ export interface ShellApi {
   loadChat(): Promise<ChatTurnDto[]>;
   /** 落盘当前对话。加载/保存失败都不该阻断聊天，故只回 ok 与原因。 */
   saveChat(history: ChatTurnDto[]): Promise<ChatHistorySaveResult>;
+  /** 更正一条它说过的话：只传序号与新正文，索引/旧原文由主进程按落盘历史核对。 */
+  correctChat(index: number, content: string): Promise<CorrectChatResult>;
+  /** 读当前确认过的称呼，以及模型提出但未确认的称呼。 */
+  getProfile(): Promise<UserProfileDto | null>;
+  /** 用户确认称呼。主进程会回读对话历史，要求这个名字确实出现在用户说过的话里。 */
+  confirmName(name: string): Promise<ConfirmNameResult>;
+  /** 否掉模型的提议，不动已确认的称呼。 */
+  dismissName(): Promise<{ ok: boolean; profile?: UserProfileDto }>;
   onChunk(cb: (delta: string) => void): void;
   /** 模型配置：解析（不落盘）、应用（写引擎配置+secrets+重启）、导入文件、排序。 */
   previewModel(text: string): Promise<ModelPreviewDto>;
@@ -126,6 +156,10 @@ const api: ShellApi = {
   abortChat: () => ipcRenderer.send("chat:abort"),
   loadChat: () => ipcRenderer.invoke("chat:load"),
   saveChat: (history) => ipcRenderer.invoke("chat:save", history),
+  correctChat: (index, content) => ipcRenderer.invoke("chat:correct", { index, content }),
+  getProfile: () => ipcRenderer.invoke("profile:get"),
+  confirmName: (name) => ipcRenderer.invoke("profile:confirm", name),
+  dismissName: () => ipcRenderer.invoke("profile:dismiss"),
   onChunk: (cb) => {
     ipcRenderer.on("chat:chunk", (_event, delta: string) => cb(delta));
   },

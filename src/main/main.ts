@@ -20,7 +20,20 @@ import {
 } from "./engine/config";
 import { readSecrets, writeSecrets } from "./engine/secrets";
 import { ChatError, streamChat, type ChatTurn } from "./engine/chat";
-import { loadChatHistory, saveChatHistory } from "./engine/chathistory";
+import { correctAssistantTurn, loadChatHistory, saveChatHistory } from "./engine/chathistory";
+import {
+  checkAssistantOrigin,
+  rememberAssistantTurn,
+  replaceAssistantHash,
+  validateOutgoingHistory,
+} from "./engine/historyguard";
+import {
+  confirmUserName,
+  dismissPendingName,
+  ensureProfile,
+  getProfileView,
+  reconcileProfile,
+} from "./engine/profile";
 import { normalize, moveModel, addModel, removeModel, setProviderModels } from "./engine/modelconfig";
 import { ensureOpencode } from "./engine/claudeconfig";
 import { probeModels } from "./engine/modelprobe";
@@ -344,17 +357,28 @@ function registerIpc(): void {
    * 失败不抛异常而是返回结构化结果：IPC 抛错只剩一条 message，
    * 而我们需要把「缺密钥 / 缺模型 / 引擎没起来」分开展示（three very different fixes）。
    */
-  ipcMain.handle("chat:send", async (_event, history: ChatTurn[]) => {
+  ipcMain.handle("chat:send", async (_event, history: unknown) => {
     if (!paths) return { ok: false as const, kind: "engine" as const, message: "还没初始化完成" };
     if (!state.port) return { ok: false as const, kind: "engine" as const, message: "引擎还没起来" };
+
+    // 渲染层带上来的历史是不可信输入：先过结构闸（role/长度/条数），再过来源闸
+    // （assistant 原文必须在本机台账里）。任何一道不过都不发请求。
+    const checked = validateOutgoingHistory(history);
+    if (!checked.ok) {
+      return { ok: false as const, kind: "invalid" as const, message: checked.error };
+    }
 
     const token = await readGatewayToken(paths.configFile);
     if (!token) return { ok: false as const, kind: "auth" as const, message: "读不到网关 token" };
 
     const sessionKey = await readSessionKey(paths.dataDir);
+    const forged = await checkAssistantOrigin(paths, sessionKey, checked.turns);
+    if (forged) {
+      return { ok: false as const, kind: "invalid" as const, message: forged };
+    }
     // BOOTSTRAP 仪式没过时，把仪式正文注入到最后一条用户消息里。
     // 这是副本，界面看到的对话历史不变；用户不会看到这段内部指令。
-    const { messages, pending } = await applyBootstrap(paths, history);
+    const { messages, pending } = await applyBootstrap(paths, checked.turns);
     const filter = createDoneFilter((delta) => sendToWindow("chat:chunk", delta), pending);
     activeChat?.abort();
     const controller = new AbortController();
@@ -371,6 +395,10 @@ function registerIpc(): void {
       });
       const finished = filter.finish();
       const text = stripDoneMarker(raw);
+      // 先把「模型真的说过这句」记进台账，下一轮来源闸才认它。
+      await rememberAssistantTurn(paths, sessionKey, text);
+      // 模型若在这轮顺手改了 USER.md 的称呼，这里会把它降级为「提议」，不让它自己定稿。
+      await reconcileProfile(paths);
       // 模型在正事回复里误写标记也算完成——标记本身是明确的完成意图。
       if (pending && (finished || hasDoneMarker(raw))) {
         await removeBootstrap(paths);
@@ -414,6 +442,54 @@ function registerIpc(): void {
     if (!paths) return { ok: false, error: "paths 尚未初始化" };
     const sessionKey = await readSessionKey(paths.dataDir);
     return saveChatHistory(paths, sessionKey, history);
+  });
+
+  /**
+   * 更正一条 assistant 回复（R1）。
+   *
+   * 参数只有「第几条 + 新正文」：要改的是哪一条、原文是什么，都以主进程落盘那份为准，
+   * 渲染层没法借这个接口改写别的轮次。改完同步写回 chat-history.json 与台账，
+   * 下一轮发送带上去的就是更正后的上下文。
+   */
+  ipcMain.handle(
+    "chat:correct",
+    async (_event, payload: { index?: unknown; content?: unknown } | null) => {
+      if (!paths) return { ok: false, error: "还没初始化完成" };
+      const sessionKey = await readSessionKey(paths.dataDir);
+      const result = await correctAssistantTurn(paths, sessionKey, payload?.index, payload?.content);
+      if (!result.ok) return result;
+      const next = typeof payload?.content === "string" ? payload.content : "";
+      await replaceAssistantHash(paths, sessionKey, result.oldContent, next);
+      await reconcileProfile(paths);
+      return result;
+    },
+  );
+
+  /**
+   * 结构化称呼（R3）。
+   *
+   * get  —— 界面读当前确认值与待确认提议；
+   * confirm —— 用户主动确认。主进程会回读对话历史，要求这个名字确实出现在用户说过的话里；
+   * dismiss —— 否掉模型提议，不动已确认值。
+   */
+  ipcMain.handle("profile:get", async () => {
+    if (!paths) return null;
+    try {
+      return await getProfileView(paths);
+    } catch {
+      return null;
+    }
+  });
+
+  ipcMain.handle("profile:confirm", async (_event, name: unknown) => {
+    if (!paths) return { ok: false, error: "还没初始化完成" };
+    const sessionKey = await readSessionKey(paths.dataDir);
+    return confirmUserName(paths, sessionKey, name);
+  });
+
+  ipcMain.handle("profile:dismiss", async () => {
+    if (!paths) return { ok: false };
+    return dismissPendingName(paths);
   });
 
   /**
@@ -742,6 +818,8 @@ app.whenReady().then(async () => {
       isPackaged: app.isPackaged,
     });
     assertPackagedAssets(paths);
+    // 称呼档案：首次启动从 USER.md 迁移已有称呼（旧档案可延续），不阻塞启动。
+    void ensureProfile(paths).catch(() => undefined);
   } catch (error) {
     dialog.showErrorBox(
       "无法启动",

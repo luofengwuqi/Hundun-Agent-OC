@@ -31,6 +31,8 @@ import { BOOTSTRAP_FILE, ensureBootstrap } from "./bootstrap";
 const SESSION_FILE = "session.json";
 const SESSION_PREFIX = "hundun-";
 const USER_FILE = "USER.md";
+/** 结构化称呼档案（R3）。它和 USER.md 一样属于「关于这个人」的内容，重置必须一起清。 */
+const PROFILE_FILE = "profile.json";
 
 /**
  * 重置后的 USER.md：只留文件骨架，所有「关于这个人」的条目都清掉。
@@ -70,7 +72,7 @@ export interface MemoryResetResult {
 }
 
 /** 只删这两个明确目标 + 清空 USER.md 内容；路径对不上就抛错。 */
-function assertTargets(paths: EnginePaths): { memoryDir: string; dreamsFile: string; userFile: string; backupDir: string } {
+function assertTargets(paths: EnginePaths): { memoryDir: string; dreamsFile: string; userFile: string; profileFile: string; backupDir: string } {
   const workspace = resolve(paths.workspace);
   const home = resolve(paths.engineHome);
   // workspace 必须在 engineHome 下面，且名字就叫 workspace
@@ -83,10 +85,12 @@ function assertTargets(paths: EnginePaths): { memoryDir: string; dreamsFile: str
   if (basename(dreamsFile) !== "DREAMS.md") throw new Error("梦日记文件名不对");
   const userFile = join(workspace, USER_FILE);
   if (basename(userFile) !== USER_FILE) throw new Error("用户档案文件名不对");
+  const profileFile = join(workspace, PROFILE_FILE);
+  if (basename(profileFile) !== PROFILE_FILE) throw new Error("称呼档案文件名不对");
   const stamp = new Date().toISOString().replace(/[:.]/g, "-");
   const backupDir = join(resolve(paths.dataDir), `memory-backup-${stamp}`);
   if (!backupDir.startsWith(resolve(paths.dataDir) + sep)) throw new Error("备份路径不对");
-  return { memoryDir, dreamsFile, userFile, backupDir };
+  return { memoryDir, dreamsFile, userFile, profileFile, backupDir };
 }
 
 /** 备份一个路径（目录递归拷）到备份目录下。用 fs.cp 兼容目录与文件。 */
@@ -106,13 +110,14 @@ export async function resetMemory(paths: EnginePaths): Promise<MemoryResetResult
   const removed: string[] = [];
   try {
     // 校验也放进 try：路径不对时返回 {ok:false,error}，不让异常穿过 IPC 层。
-    const { memoryDir, dreamsFile, userFile, backupDir } = assertTargets(paths);
+    const { memoryDir, dreamsFile, userFile, profileFile, backupDir } = assertTargets(paths);
     await mkdir(backupDir, { recursive: true, mode: 0o700 });
     await backup(memoryDir, join(backupDir, "memory"));
     await backup(dreamsFile, join(backupDir, "DREAMS.md"));
     // USER.md 也备份：它里面有用户亲手调过的稳定偏好 + 仪式写的档案，
     // 想找回旧称呼/旧档案就从这里拿。写空骨架在删完之后做，避免备份到空文件。
     await backup(userFile, join(backupDir, USER_FILE));
+    await backup(profileFile, join(backupDir, PROFILE_FILE));
     // 会话 key 也留一份，想找回旧会话时把 session.json 从备份恢复即可
     const sessionPath = join(resolve(paths.dataDir), SESSION_FILE);
     const sessionRaw = await readFile(sessionPath, "utf8").catch(() => "{}");
@@ -134,6 +139,11 @@ export async function resetMemory(paths: EnginePaths): Promise<MemoryResetResult
     // 来源全在 observed 条目里，留着模型就还会叫出旧称呼。写空骨架，仪式会重新认识人。
     await writeFile(userFile, EMPTY_USER_PROFILE, { mode: 0o600 });
     removed.push("workspace/USER.md 里的用户档案（文件保留，内容清空）");
+
+    // 称呼档案也删掉：它是结构化的事实源，留着等于「记得你的名字」。
+    // 备份里有一份，想找回旧称呼可以拿回来。
+    await rm(profileFile, { force: true });
+    removed.push("workspace/profile.json（确认过的称呼）");
 
     // 换新 session key：引擎下次对话就是全新会话，不再带着旧记忆。
     // SESSION_PREFIX + uuid：和默认 hundun-main 同形状，readSessionKey 直接认。

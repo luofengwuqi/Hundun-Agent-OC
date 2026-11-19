@@ -40,6 +40,12 @@ const turns = ref([])
 const draft = ref('')
 const sending = ref(false)
 const chatError = ref('')
+/** 结构化称呼：{ name, confirmedAt, source, pending }。只由主进程给，界面不自己推断。 */
+const profile = ref(null)
+/** 正在更正的是第几条 assistant 回复；-1 表示没有。 */
+const editing = ref(-1)
+const editText = ref('')
+const editError = ref('')
 
 /** 能不能说话：引擎就绪 + 有模型 + 有密钥。缺哪一样要说清是哪一样。 */
 const canSend = computed(
@@ -261,7 +267,74 @@ async function send() {
     sending.value = false
     scrollToEnd()
     void persistHistory()
+    void refreshProfile()
   }
+}
+
+/**
+ * 称呼档案：主进程是唯一事实源（profile.json）。模型只能在对话里提议，
+ * 这里只负责把「已确认值 / 待确认提议」显示出来，并把用户的确认动作交回主进程。
+ */
+async function refreshProfile() {
+  try {
+    profile.value = await window.shellApi.getProfile()
+  } catch {
+    // 读不到就不显示确认条，不打断对话
+  }
+}
+
+function startCorrect(i) {
+  if (sending.value) return
+  const turn = turns.value[i]
+  if (!turn || turn.role !== 'assistant' || turn.content.length === 0) return
+  editing.value = i
+  editText.value = turn.content
+  editError.value = ''
+}
+
+function cancelCorrect() {
+  editing.value = -1
+  editError.value = ''
+}
+
+/**
+ * 更正一条 assistant 回复。只把「第几条 + 新正文」交给主进程：
+ * 它按落盘历史核对序号与旧原文，改完同步写回 chat-history.json 与台账，
+ * 下一轮发出去的上下文就是改好的这份。
+ */
+async function saveCorrect(i) {
+  if (editText.value.trim().length === 0) {
+    editError.value = '不能改成空的'
+    return
+  }
+  const r = await window.shellApi.correctChat(i, editText.value)
+  if (!r.ok) {
+    editError.value = r.error || '改不动'
+    return
+  }
+  turns.value = r.turns
+  editing.value = -1
+  editError.value = ''
+  void refreshProfile()
+  flash('已更正，下一轮就用改好的说法')
+}
+
+/** 用户点「用这个」才算确认；主进程还会回读对话历史，核实这个名字确实出自用户之口。 */
+async function confirmPending() {
+  const name = profile.value?.pending?.name
+  if (!name) return
+  const r = await window.shellApi.confirmName(name)
+  if (!r.ok) {
+    flash(r.error || '确认失败')
+    return
+  }
+  profile.value = r.profile
+  flash('好，就用「' + name + '」')
+}
+
+async function dismissPending() {
+  const r = await window.shellApi.dismissName()
+  if (r && r.profile) profile.value = r.profile
 }
 
 function onKeydown(event) {
@@ -482,6 +555,7 @@ onMounted(async () => {
   })
   await refresh()
   await restoreHistory()
+  await refreshProfile()
   await loadSavedModel()
   // 兜底轮询：IPC 事件丢了也不至于界面永远停在旧状态
   timer = window.setInterval(refresh, 3000)
@@ -623,14 +697,48 @@ onBeforeUnmount(() => {
                 <img :src="LOGO" alt="馄饨" draggable="false" />
               </div>
               <div class="content hx-reply">
-                <p v-if="turn.content.length === 0" class="hx-typing">…</p>
-                <p v-else>{{ turn.content }}</p>
+                <template v-if="editing === i">
+                  <textarea
+                    v-model="editText"
+                    class="hx-correct-box"
+                    rows="4"
+                    spellcheck="false"
+                  />
+                  <div class="hx-correct-bar">
+                    <span v-if="editError" class="hx-correct-err">{{ editError }}</span>
+                    <button class="hx-mini" @click="cancelCorrect">取消</button>
+                    <button class="hx-mini primary" @click="saveCorrect(i)">保存</button>
+                  </div>
+                </template>
+                <template v-else>
+                  <p v-if="turn.content.length === 0" class="hx-typing">…</p>
+                  <p v-else>{{ turn.content }}</p>
+                  <button
+                    v-if="turn.content.length > 0 && !sending"
+                    class="hx-fix"
+                    title="它说错了？改掉这一条，下一轮就按改好的发"
+                    @click="startCorrect(i)"
+                  >
+                    更正这条
+                  </button>
+                </template>
               </div>
             </div>
           </template>
 
           <div v-if="chatError" class="notice bad">{{ chatError }}</div>
           <div v-if="state.notice" class="notice">{{ state.notice }}</div>
+        </div>
+
+        <!-- 称呼只接受用户确认：模型写进档案的值先挂在这里，等本人在场点头。 -->
+        <div v-if="profile && profile.pending" class="hx-pending">
+          <span class="hx-pending-text">
+            它想叫你「{{ profile.pending.name }}」，这个称呼对吗？
+          </span>
+          <span class="hx-pending-actions">
+            <button class="hx-mini" @click="dismissPending">不用</button>
+            <button class="hx-mini primary" @click="confirmPending">用这个</button>
+          </span>
         </div>
 
         <div class="composer">

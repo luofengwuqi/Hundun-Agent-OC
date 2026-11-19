@@ -21,7 +21,9 @@ const FORMAT_VERSION = 1;
  * 取值理由：现有 send() 把整份 turns 作为上下文发给模型，窗口再大也有上限；
  * 200 轮足够覆盖任何一次连贯对话，再往前的轮次留在引擎的 SQLite 里（换 key 可找回）。
  */
-const MAX_TURNS = 400;
+export const MAX_TURNS = 400;
+/** 单条消息上限。发送校验（historyguard）与更正共用同一个值，避免两处漂移。 */
+export const MAX_TURN_CHARS = 12_000;
 
 interface HistoryFile {
   version: number;
@@ -104,4 +106,56 @@ export async function saveChatHistory(
   } catch (error) {
     return { ok: false, error: (error as Error).message || String(error) };
   }
+}
+
+export type CorrectResult =
+  | { readonly ok: true; readonly turns: ChatTurn[]; readonly oldContent: string }
+  | { readonly ok: false; readonly error: string };
+
+/**
+ * 更正一条 assistant 回复（R1）。
+ *
+ * 只接受「第几条 + 新正文」，不接受渲染层整份历史：索引与旧原文都以**主进程落盘的那份**
+ * 为准，渲染层没法借更正接口偷偷改别的轮次。改完同步写回 chat-history.json，
+ * 下一轮 send 带上去的就是更正后的上下文。
+ */
+export async function correctAssistantTurn(
+  paths: EnginePaths,
+  sessionKey: string,
+  index: unknown,
+  content: unknown,
+): Promise<CorrectResult> {
+  if (typeof index !== "number" || !Number.isInteger(index) || index < 0) {
+    return { ok: false, error: "要更正哪一条？序号不对。" };
+  }
+  if (typeof content !== "string" || content.trim().length === 0) {
+    return { ok: false, error: "更正后的内容不能为空。" };
+  }
+  if (content.length > MAX_TURN_CHARS) {
+    return { ok: false, error: `更正后的内容超过 ${MAX_TURN_CHARS} 字。` };
+  }
+
+  let file: Partial<HistoryFile>;
+  try {
+    file = JSON.parse(await readFile(historyPath(paths), "utf8")) as Partial<HistoryFile>;
+  } catch {
+    return { ok: false, error: "读不到当前对话历史，没法更正。" };
+  }
+  if (file.version !== FORMAT_VERSION) return { ok: false, error: "对话历史版本不对，没法更正。" };
+  if (file.sessionKey !== sessionKey) {
+    return { ok: false, error: "这份历史不属于当前会话，没法更正。" };
+  }
+  if (!Array.isArray(file.turns)) return { ok: false, error: "对话历史格式不对，没法更正。" };
+  if (index >= file.turns.length) return { ok: false, error: "这一条已经不在历史里了，刷新后再试。" };
+
+  const target = file.turns[index];
+  if (!target || target.role !== "assistant") {
+    return { ok: false, error: "只有它说过的话可以更正。" };
+  }
+
+  const oldContent = target.content;
+  const turns = file.turns.map((turn, i) => (i === index ? { role: "assistant" as const, content } : turn));
+  const saved = await saveChatHistory(paths, sessionKey, turns);
+  if (!saved.ok) return { ok: false, error: saved.error ?? "写回历史失败。" };
+  return { ok: true, turns: clean(turns), oldContent };
 }

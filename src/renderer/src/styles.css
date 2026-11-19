@@ -2463,3 +2463,110 @@ textarea::placeholder {
 .hx-json-edit:focus {
   border-color: var(--accent);
 }
+
+/* ---------------- 更正一条回复 / 确认称呼（R1 / R3） ---------------- */
+
+.hx-fix {
+  background: none;
+  border: 0;
+  padding: 0;
+  margin-top: 6px;
+  color: var(--ink-3);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.15s ease, color 0.15s ease;
+}
+
+.msg:hover .hx-fix {
+  opacity: 1;
+}
+
+.hx-fix:hover {
+  color: var(--accent);
+}
+
+.hx-correct-box {
+  width: 100%;
+  min-height: 96px;
+  resize: vertical;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--panel);
+  color: var(--ink);
+  font: inherit;
+  line-height: 1.7;
+  user-select: text;
+}
+
+.hx-correct-box:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.hx-correct-bar {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.hx-correct-err {
+  margin-right: auto;
+  color: var(--accent);
+  font-size: 12px;
+}
+
+.hx-mini {
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--panel);
+  color: var(--ink-2);
+  font: inherit;
+  font-size: 12.5px;
+  padding: 3px 12px;
+  cursor: pointer;
+}
+
+.hx-mini:hover {
+  border-color: var(--ink-3);
+  color: var(--ink);
+}
+
+.hx-mini.primary {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: #fff;
+}
+
+.hx-mini.primary:hover {
+  color: #fff;
+  opacity: 0.92;
+}
+
+.hx-pending {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin: 0 18px 8px;
+  padding: 8px 12px;
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--accent);
+  border-radius: var(--radius);
+  background: var(--accent-soft);
+  color: var(--ink-2);
+  font-size: 13px;
+}
+
+.hx-pending-text {
+  margin-right: auto;
+}
+
+.hx-pending-actions {
+  display: flex;
+  gap: 8px;
+}
