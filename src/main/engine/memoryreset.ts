@@ -14,6 +14,13 @@
  *   2. 删除前先备份到应用数据目录（备份不被引擎读，卸载可删）；
  *   3. 目标路径硬校验：必须是 paths.workspace 下的 memory 目录 / DREAMS.md，
  *      名字对不上就拒绝删，绝不递归删 workspace 本身。
+ *
+ * USER.md 为什么不「保留」（D032，推翻 D029 的原文承诺）：
+ *   D030 的 BOOTSTRAP 仪式指示模型把「称呼、近况」写进 USER.md（observed 段落），
+ *   这份名义上的「人格文件」实际成了用户档案。D029 只删 memory/ 与 DREAMS.md，
+ *   于是重置后模型照读 USER.md，照样叫得出名字——弹窗承诺的「不再记得」落空。
+ *   所以这里备份后把 USER.md 清成空骨架：文件保留，关于这个人的内容不保留。
+ *   SOUL / IDENTITY / AGENTS 仍按 D029 原样保留，安全约定也在 AGENTS.md 里兜底。
  */
 import { randomUUID } from "node:crypto";
 import { copyFile, mkdir, readFile, rm, writeFile } from "node:fs/promises";
@@ -23,6 +30,33 @@ import { BOOTSTRAP_FILE, ensureBootstrap } from "./bootstrap";
 
 const SESSION_FILE = "session.json";
 const SESSION_PREFIX = "hundun-";
+const USER_FILE = "USER.md";
+
+/**
+ * 重置后的 USER.md：只留文件骨架，所有「关于这个人」的条目都清掉。
+ * 保留结构说明是为了让引擎下次按同样格式写入（BOOTSTRAP 仪式会重新认识用户）；
+ * 不写任何 observed 条目，模型就没有旧名字/旧近况可读。
+ */
+const EMPTY_USER_PROFILE = `# USER.md - User Model
+
+Stable user preferences and profile facts as directives that can guide future sessions.
+
+Use one directive per entry:
+
+\`\`\`md
+<!-- observed: YYYY-MM-DD | status: active -->
+
+- Prefer concise progress updates during implementation work.
+\`\`\`
+
+## Directives
+
+（还没有关于这个人的档案。下一次对话会从认识开始，慢慢写进来。）
+
+## Related
+
+- [Agent workspace](/concepts/agent-workspace)
+`;
 
 export interface MemoryResetResult {
   ok: boolean;
@@ -35,8 +69,8 @@ export interface MemoryResetResult {
   bootstrapRestored?: boolean;
 }
 
-/** 只删这两个明确目标；路径对不上就抛错。 */
-function assertTargets(paths: EnginePaths): { memoryDir: string; dreamsFile: string; backupDir: string } {
+/** 只删这两个明确目标 + 清空 USER.md 内容；路径对不上就抛错。 */
+function assertTargets(paths: EnginePaths): { memoryDir: string; dreamsFile: string; userFile: string; backupDir: string } {
   const workspace = resolve(paths.workspace);
   const home = resolve(paths.engineHome);
   // workspace 必须在 engineHome 下面，且名字就叫 workspace
@@ -47,10 +81,12 @@ function assertTargets(paths: EnginePaths): { memoryDir: string; dreamsFile: str
   if (basename(memoryDir) !== "memory") throw new Error("记忆目录名不对");
   const dreamsFile = join(workspace, "DREAMS.md");
   if (basename(dreamsFile) !== "DREAMS.md") throw new Error("梦日记文件名不对");
+  const userFile = join(workspace, USER_FILE);
+  if (basename(userFile) !== USER_FILE) throw new Error("用户档案文件名不对");
   const stamp = new Date().toISOString().replace(/[:.]/g, "-");
   const backupDir = join(resolve(paths.dataDir), `memory-backup-${stamp}`);
   if (!backupDir.startsWith(resolve(paths.dataDir) + sep)) throw new Error("备份路径不对");
-  return { memoryDir, dreamsFile, backupDir };
+  return { memoryDir, dreamsFile, userFile, backupDir };
 }
 
 /** 备份一个路径（目录递归拷）到备份目录下。用 fs.cp 兼容目录与文件。 */
@@ -70,10 +106,13 @@ export async function resetMemory(paths: EnginePaths): Promise<MemoryResetResult
   const removed: string[] = [];
   try {
     // 校验也放进 try：路径不对时返回 {ok:false,error}，不让异常穿过 IPC 层。
-    const { memoryDir, dreamsFile, backupDir } = assertTargets(paths);
+    const { memoryDir, dreamsFile, userFile, backupDir } = assertTargets(paths);
     await mkdir(backupDir, { recursive: true, mode: 0o700 });
     await backup(memoryDir, join(backupDir, "memory"));
     await backup(dreamsFile, join(backupDir, "DREAMS.md"));
+    // USER.md 也备份：它里面有用户亲手调过的稳定偏好 + 仪式写的档案，
+    // 想找回旧称呼/旧档案就从这里拿。写空骨架在删完之后做，避免备份到空文件。
+    await backup(userFile, join(backupDir, USER_FILE));
     // 会话 key 也留一份，想找回旧会话时把 session.json 从备份恢复即可
     const sessionPath = join(resolve(paths.dataDir), SESSION_FILE);
     const sessionRaw = await readFile(sessionPath, "utf8").catch(() => "{}");
@@ -90,6 +129,11 @@ export async function resetMemory(paths: EnginePaths): Promise<MemoryResetResult
     // 旧仪式也要清掉，下面才会无条件重种一份——不然「重置」完仪式还是旧的。
     await rm(join(workspace, BOOTSTRAP_FILE), { force: true });
     removed.push("workspace/BOOTSTRAP.md");
+
+    // USER.md 不删文件，只清内容（D032）：名字、近况、陪伴偏好这些「记得你」的
+    // 来源全在 observed 条目里，留着模型就还会叫出旧称呼。写空骨架，仪式会重新认识人。
+    await writeFile(userFile, EMPTY_USER_PROFILE, { mode: 0o600 });
+    removed.push("workspace/USER.md 里的用户档案（文件保留，内容清空）");
 
     // 换新 session key：引擎下次对话就是全新会话，不再带着旧记忆。
     // SESSION_PREFIX + uuid：和默认 hundun-main 同形状，readSessionKey 直接认。
@@ -111,8 +155,8 @@ export const RESET_NOTICE = {
   title: "重置记忆",
   message: "清空馄饨的记忆，回到第一次见面的状态？",
   detail:
-    "会删掉记忆日志、梦日记，并换一个新会话——它不再记得你们聊过什么。" +
-    "下次见面会重新走一遍认识的流程。人格文件（SOUL/IDENTITY/USER/AGENTS）、模型配置和密钥都保留。\n\n" +
-    "删之前会在应用数据目录留一份备份，想找回可以拿回来。",
+    "会删掉记忆日志、梦日记，换一个新会话，并清空它记着的关于你的事——称呼、近况、聊天里攒下的偏好。这才是「不再记得」真正生效的原因。" +
+    "下次见面会重新走一遍认识的流程。馄饨自己的性格（SOUL / IDENTITY / AGENTS）、模型配置和密钥都保留。\n\n" +
+    "删之前会在应用数据目录留一份备份，想找回旧档案可以拿回来。",
   buttons: ["取消", "清空记忆并重置"],
 };
