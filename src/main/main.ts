@@ -20,6 +20,7 @@ import {
 } from "./engine/config";
 import { readSecrets, writeSecrets } from "./engine/secrets";
 import { ChatError, streamChat, type ChatTurn } from "./engine/chat";
+import { loadChatHistory, saveChatHistory } from "./engine/chathistory";
 import { normalize, moveModel, addModel, removeModel, setProviderModels } from "./engine/modelconfig";
 import { ensureOpencode } from "./engine/claudeconfig";
 import { probeModels } from "./engine/modelprobe";
@@ -390,6 +391,29 @@ function registerIpc(): void {
 
   ipcMain.on("chat:abort", () => {
     activeChat?.abort();
+  });
+
+  /**
+   * 对话历史回读 / 落盘。
+   *
+   * 只搬界面那份 turns（它本就是发给模型的上下文副本），不碰引擎的记忆与会话
+   * （D013）。两份历史靠 session key 对齐：重置记忆换了 key，load 就会返回空，
+   * 界面自然回到第一次见面的样子，不会出现「记忆清了，界面还挂着旧对话」。
+   */
+  ipcMain.handle("chat:load", async () => {
+    if (!paths) return [];
+    try {
+      const sessionKey = await readSessionKey(paths.dataDir);
+      return await loadChatHistory(paths, sessionKey);
+    } catch {
+      return [];
+    }
+  });
+
+  ipcMain.handle("chat:save", async (_event, history: ChatTurn[]) => {
+    if (!paths) return { ok: false, error: "paths 尚未初始化" };
+    const sessionKey = await readSessionKey(paths.dataDir);
+    return saveChatHistory(paths, sessionKey, history);
   });
 
   /**

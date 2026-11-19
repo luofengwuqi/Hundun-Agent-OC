@@ -39,6 +39,9 @@ export type ChatResult =
   | { ok: true; text: string }
   | { ok: false; kind: "auth" | "endpoint" | "engine" | "network" | "overload" | "aborted"; message: string };
 
+/** 对话历史落盘的结果。失败不打断对话，只带回原因供诊断。 */
+export type ChatHistorySaveResult = { ok: boolean; error?: string };
+
 export interface ModelPreviewDto {
   ok: boolean;
   errors: string[];
@@ -81,6 +84,10 @@ export interface ShellApi {
   /** 发一句话。流式片段通过 onChunk 推回来，这里只等最终结果。 */
   sendChat(history: ChatTurnDto[]): Promise<ChatResult>;
   abortChat(): void;
+  /** 回读上次的对话；session key 对不上（重置过记忆）时返回空。 */
+  loadChat(): Promise<ChatTurnDto[]>;
+  /** 落盘当前对话。加载/保存失败都不该阻断聊天，故只回 ok 与原因。 */
+  saveChat(history: ChatTurnDto[]): Promise<ChatHistorySaveResult>;
   onChunk(cb: (delta: string) => void): void;
   /** 模型配置：解析（不落盘）、应用（写引擎配置+secrets+重启）、导入文件、排序。 */
   previewModel(text: string): Promise<ModelPreviewDto>;
@@ -117,6 +124,8 @@ const api: ShellApi = {
   restartEngine: () => ipcRenderer.invoke("shell:restart-engine"),
   sendChat: (history) => ipcRenderer.invoke("chat:send", history),
   abortChat: () => ipcRenderer.send("chat:abort"),
+  loadChat: () => ipcRenderer.invoke("chat:load"),
+  saveChat: (history) => ipcRenderer.invoke("chat:save", history),
   onChunk: (cb) => {
     ipcRenderer.on("chat:chunk", (_event, delta: string) => cb(delta));
   },

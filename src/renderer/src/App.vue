@@ -34,6 +34,7 @@ const scroller = ref(null)
 /**
  * 对话历史。**这份就是发给模型的全部上下文**——不额外维护一份「主进程版」，
  * 免得界面显示的和实际发出去的悄悄分叉。
+ * 进程重启后由 restoreHistory() 落盘回读填上，不是每次进来看见空白。
  */
 const turns = ref([])
 const draft = ref('')
@@ -166,11 +167,13 @@ async function devResetMemory() {
       flash('重置失败：' + (r.error || '未知错误'))
       return
     }
-    // 记忆没了、会话 key 换了：界面这边也清空，回到第一次见面的样子。
+    // 记忆没了、会话 key 换了：界面这边也清空，落盘的历史一并清掉，
+    // 回到第一次见面的样子（loadChat 也会因 key 不符拒绝旧历史，双保险）。
     turns.value = []
     draft.value = ''
     chatError.value = ''
     view.value = 'chat'
+    void window.shellApi.saveChat([]).catch(() => {})
     flash('记忆已清空，下次见面会重新认识你；备份在 ' + (r.backupDir || '应用数据目录'))
   } catch (error) {
     flash('重置失败：' + (error?.message || error))
@@ -186,6 +189,32 @@ function scrollToEnd() {
   nextTick(() => {
     if (scroller.value) scroller.value.scrollTop = scroller.value.scrollHeight
   })
+}
+
+/**
+ * 回读上次聊过的话。引擎侧其实一直记得（session key 是持久的），
+ * 但界面每次进去空白，给人的感觉就是「它不记得我」——直接打在 D011 上。
+ * 所以进入时把落盘的那份填回来，跟引擎的记忆是两件事，各管各的。
+ */
+async function restoreHistory() {
+  try {
+    const saved = await window.shellApi.loadChat()
+    if (!Array.isArray(saved) || saved.length === 0 || turns.value.length > 0) return
+    turns.value = saved
+      .filter((t) => (t.role === 'user' || t.role === 'assistant') && typeof t.content === 'string' && t.content.length > 0)
+      .map((t) => ({ role: t.role, content: t.content }))
+    if (turns.value.length) scrollToEnd()
+  } catch {
+    // 读不出来就当第一次见面，不阻断启动
+  }
+}
+
+/** 每轮说完落一次盘。只挑非空、能回显的轮次；失败不打断对话，下次发送会再试。 */
+function persistHistory() {
+  const snapshot = turns.value
+    .filter((t) => (t.role === 'user' || t.role === 'assistant') && t.content.length > 0)
+    .map((t) => ({ role: t.role, content: t.content }))
+  return window.shellApi.saveChat(snapshot).catch(() => {})
 }
 
 /**
@@ -231,6 +260,7 @@ async function send() {
   } finally {
     sending.value = false
     scrollToEnd()
+    void persistHistory()
   }
 }
 
@@ -451,6 +481,7 @@ onMounted(async () => {
     scrollToEnd()
   })
   await refresh()
+  await restoreHistory()
   await loadSavedModel()
   // 兜底轮询：IPC 事件丢了也不至于界面永远停在旧状态
   timer = window.setInterval(refresh, 3000)
@@ -566,7 +597,8 @@ onBeforeUnmount(() => {
 
       <section v-show="view === 'chat'" class="chat-col">
         <div ref="scroller" class="messages">
-          <div class="hx-day">今天</div>
+          <!-- 不用「今天」：回读的历史可能跨天，写死日期会误导。中性标签对每次都对。 -->
+          <div class="hx-day">我们的对话</div>
 
           <div v-if="turns.length === 0" class="msg">
             <div class="avatar">
