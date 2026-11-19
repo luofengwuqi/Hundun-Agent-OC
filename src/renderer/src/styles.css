@@ -2206,6 +2206,19 @@ textarea::placeholder {
 .hx-btn.quiet {
   color: var(--ink-3);
 }
+/* 开发者：危险动作实心警示色，不和普通按钮长一个样 */
+.hx-btn.danger {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+.hx-btn.danger:hover {
+  background: #a91f23;
+  border-color: #a91f23;
+}
+.hx-btn.danger:disabled {
+  opacity: 0.55;
+}
 .hx-note {
   margin: 12px 0 0;
   font-size: 12.5px;

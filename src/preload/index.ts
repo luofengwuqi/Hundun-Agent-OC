@@ -97,6 +97,8 @@ export interface ShellApi {
   openWorkspace(): Promise<string>;
   /** 应用自己的数据目录（诊断用）。 */
   openDataDir(): Promise<string>;
+  /** 开发者选项：重置记忆。确认弹窗在主进程，取消时 canceled:true。 */
+  devResetMemory(): Promise<{ ok: boolean; canceled?: boolean; error?: string; backupDir?: string; removed: string[] }>;
   probe(): Promise<boolean>;
   /** 无边框窗口的自绘按钮用（frame: false）。 */
   winMinimize(): void;
@@ -126,6 +128,7 @@ const api: ShellApi = {
   currentModel: () => ipcRenderer.invoke("model:current"),
   openMemoryDir: () => ipcRenderer.invoke("shell:open-memory-dir"),
   openWorkspace: () => ipcRenderer.invoke("shell:open-workspace"),
+  devResetMemory: () => ipcRenderer.invoke("dev:reset-memory"),
   openDataDir: () => ipcRenderer.invoke("shell:open-data-dir"),
   probe: () => ipcRenderer.invoke("shell:probe"),
   // 这两个走 send 而不是 invoke：窗口已经在消失，没有返回值可等

@@ -26,6 +26,7 @@ import { probeModels } from "./engine/modelprobe";
 import { applyModelConfig } from "./engine/modelapply";
 import { findAdoptableEngine, probeReady, startEngine, clearRuntimeRecord, type EngineHandle, type RuntimeRecord } from "./engine/supervise";
 import { findFreePort } from "./engine/port";
+import { resetMemory, RESET_NOTICE } from "./engine/memoryreset";
 import { assertPackagedAssets, resolveEnginePaths, type EnginePaths } from "./engine/paths";
 import type { EngineFailure } from "./engine/errors";
 
@@ -552,6 +553,30 @@ function registerIpc(): void {
     const target = requirePaths().workspace;
     await shell.openPath(target);
     return target;
+  });
+
+  // 开发者选项（D029）：重置记忆。确认弹窗在主进程——渲染层会误触，弹窗不会，
+  // 而且「取消」是默认键。人格文件、模型配置、密钥都不动，见 memoryreset.ts。
+  ipcMain.handle("dev:reset-memory", async () => {
+    const choice = dialog.showMessageBoxSync(mainWindow!, {
+      type: "warning",
+      title: RESET_NOTICE.title,
+      message: RESET_NOTICE.message,
+      detail: RESET_NOTICE.detail,
+      buttons: RESET_NOTICE.buttons,
+      defaultId: 0,
+      cancelId: 0,
+      noLink: true,
+    });
+    if (choice !== 1) return { ok: false, canceled: true, removed: [] };
+    const result = await resetMemory(requirePaths());
+    // 引擎正在跑：重启让新 session key 立即生效，也把内存里缓存的旧记忆清掉。
+    if (result.ok && engine) {
+      await engine.stop();
+      engine = undefined;
+      await bootEngine();
+    }
+    return result;
   });
 
   ipcMain.handle("shell:probe", async () => {

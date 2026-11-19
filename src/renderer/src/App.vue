@@ -154,6 +154,31 @@ async function openData() {
   flash('已打开应用数据目录')
 }
 
+/** 开发者选项：重置记忆（D029）。确认在主进程系统弹窗里，取消就是 canceled。 */
+const resettingMemory = ref(false)
+async function devResetMemory() {
+  if (resettingMemory.value) return
+  resettingMemory.value = true
+  try {
+    const r = await window.shellApi.devResetMemory()
+    if (r.canceled) return
+    if (!r.ok) {
+      flash('重置失败：' + (r.error || '未知错误'))
+      return
+    }
+    // 记忆没了、会话 key 换了：界面这边也清空，回到第一次见面的样子。
+    turns.value = []
+    draft.value = ''
+    chatError.value = ''
+    view.value = 'chat'
+    flash('记忆已清空，备份在 ' + (r.backupDir || '应用数据目录'))
+  } catch (error) {
+    flash('重置失败：' + (error?.message || error))
+  } finally {
+    resettingMemory.value = false
+  }
+}
+
 const minimize = () => window.shellApi.winMinimize()
 const closeWin = () => window.shellApi.winClose()
 
@@ -516,6 +541,27 @@ onBeforeUnmount(() => {
           </svg>
           <span>设置</span>
         </button>
+        <button
+          class="rail-item"
+          :class="{ on: view === 'dev' }"
+          title="开发者"
+          @click="view = 'dev'"
+        >
+          <svg
+            viewBox="0 0 24 24"
+            width="18"
+            height="18"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.6"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+            aria-hidden="true"
+          >
+            <path d="M8 9l-4 3 4 3M16 9l4 3-4 3M13.5 6l-3 12" />
+          </svg>
+          <span>开发者</span>
+        </button>
       </nav>
 
       <section v-show="view === 'chat'" class="chat-col">
@@ -708,6 +754,27 @@ onBeforeUnmount(() => {
           <pre class="hx-logs">{{ logs.length ? logs.join('\n') : '（等待引擎输出）' }}</pre>
           <div class="hx-row">
             <button class="hx-btn quiet" @click="openData">应用数据目录（诊断用）</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- 开发者：测试用的东西放这里，没有日常该碰的开关 -->
+      <section v-show="view === 'dev'" class="hx-set">
+        <h2 class="hx-set-title">开发者</h2>
+
+        <div class="hx-block">
+          <div class="hx-block-head">
+            <span class="hx-block-title">初始化</span>
+          </div>
+          <p class="hx-note">
+            清空馄饨的记忆：记忆日志、梦日记，并换一个新会话——它不再记得你们聊过什么。
+            人格文件、模型配置和密钥都保留。删之前会留一份备份在应用数据目录。
+            点下去会先弹一次系统确认。
+          </p>
+          <div class="hx-row">
+            <button class="hx-btn danger" :disabled="resettingMemory" @click="devResetMemory">
+              {{ resettingMemory ? '清空中…' : '清空记忆并重置' }}
+            </button>
           </div>
         </div>
       </section>
