@@ -27,6 +27,13 @@ import { applyModelConfig } from "./engine/modelapply";
 import { findAdoptableEngine, probeReady, startEngine, clearRuntimeRecord, type EngineHandle, type RuntimeRecord } from "./engine/supervise";
 import { findFreePort } from "./engine/port";
 import { resetMemory, RESET_NOTICE } from "./engine/memoryreset";
+import {
+  applyBootstrap,
+  createDoneFilter,
+  hasDoneMarker,
+  removeBootstrap,
+  stripDoneMarker,
+} from "./engine/bootstrap";
 import { assertPackagedAssets, resolveEnginePaths, type EnginePaths } from "./engine/paths";
 import type { EngineFailure } from "./engine/errors";
 
@@ -344,19 +351,29 @@ function registerIpc(): void {
     if (!token) return { ok: false as const, kind: "auth" as const, message: "读不到网关 token" };
 
     const sessionKey = await readSessionKey(paths.dataDir);
+    // BOOTSTRAP 仪式没过时，把仪式正文注入到最后一条用户消息里。
+    // 这是副本，界面看到的对话历史不变；用户不会看到这段内部指令。
+    const { messages, pending } = await applyBootstrap(paths, history);
+    const filter = createDoneFilter((delta) => sendToWindow("chat:chunk", delta), pending);
     activeChat?.abort();
     const controller = new AbortController();
     activeChat = controller;
 
     try {
-      const text = await streamChat({
+      const raw = await streamChat({
         port: state.port,
         token,
         sessionKey,
-        messages: history,
+        messages,
         signal: controller.signal,
-        onDelta: (delta) => sendToWindow("chat:chunk", delta),
+        onDelta: (delta) => filter.push(delta),
       });
+      const finished = filter.finish();
+      const text = stripDoneMarker(raw);
+      // 模型在正事回复里误写标记也算完成——标记本身是明确的完成意图。
+      if (pending && (finished || hasDoneMarker(raw))) {
+        await removeBootstrap(paths);
+      }
       return { ok: true as const, text };
     } catch (error) {
       if ((error as Error).name === "AbortError") {

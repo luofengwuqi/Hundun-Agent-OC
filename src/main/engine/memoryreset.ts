@@ -19,6 +19,7 @@ import { randomUUID } from "node:crypto";
 import { copyFile, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { basename, join, resolve, sep } from "node:path";
 import type { EnginePaths } from "./paths";
+import { BOOTSTRAP_FILE, ensureBootstrap } from "./bootstrap";
 
 const SESSION_FILE = "session.json";
 const SESSION_PREFIX = "hundun-";
@@ -30,6 +31,8 @@ export interface MemoryResetResult {
   backupDir?: string;
   /** 删掉的相对路径列表，给用户看清楚删了什么。 */
   removed: string[];
+  /** 仪式是否重新种下（回到第一次见面）。 */
+  bootstrapRestored?: boolean;
 }
 
 /** 只删这两个明确目标；路径对不上就抛错。 */
@@ -75,12 +78,18 @@ export async function resetMemory(paths: EnginePaths): Promise<MemoryResetResult
     const sessionPath = join(resolve(paths.dataDir), SESSION_FILE);
     const sessionRaw = await readFile(sessionPath, "utf8").catch(() => "{}");
     await writeFile(join(backupDir, SESSION_FILE), sessionRaw, { mode: 0o600 });
+    // 仪式文件也留一份；重置后我们会重新种一份新的。
+    const workspace = resolve(paths.workspace);
+    await backup(join(workspace, BOOTSTRAP_FILE), join(backupDir, BOOTSTRAP_FILE));
 
     // 备份齐了才开始删。force:true：本来就没有记忆文件也算成功（幂等）。
     await rm(memoryDir, { recursive: true, force: true });
     removed.push("workspace/memory/");
     await rm(dreamsFile, { force: true });
     removed.push("workspace/DREAMS.md");
+    // 旧仪式也要清掉，下面才会无条件重种一份——不然「重置」完仪式还是旧的。
+    await rm(join(workspace, BOOTSTRAP_FILE), { force: true });
+    removed.push("workspace/BOOTSTRAP.md");
 
     // 换新 session key：引擎下次对话就是全新会话，不再带着旧记忆。
     // SESSION_PREFIX + uuid：和默认 hundun-main 同形状，readSessionKey 直接认。
@@ -88,7 +97,10 @@ export async function resetMemory(paths: EnginePaths): Promise<MemoryResetResult
     await mkdir(resolve(paths.dataDir), { recursive: true });
     await writeFile(sessionPath, `${JSON.stringify({ sessionKey: freshKey }, null, 2)}\n`, { mode: 0o600 });
 
-    return { ok: true, backupDir, removed };
+    // 重新种下 BOOTSTRAP：下一次对话它会重新认识你，而不是直接拿来路不明的记忆接着聊。
+    const bootstrapRestored = await ensureBootstrap(paths);
+
+    return { ok: true, backupDir, removed, bootstrapRestored };
   } catch (error) {
     return { ok: false, error: (error as Error).message || String(error), removed };
   }
@@ -100,7 +112,7 @@ export const RESET_NOTICE = {
   message: "清空馄饨的记忆，回到第一次见面的状态？",
   detail:
     "会删掉记忆日志、梦日记，并换一个新会话——它不再记得你们聊过什么。" +
-    "人格文件（SOUL/IDENTITY/USER/AGENTS）、模型配置和密钥都保留。\n\n" +
+    "下次见面会重新走一遍认识的流程。人格文件（SOUL/IDENTITY/USER/AGENTS）、模型配置和密钥都保留。\n\n" +
     "删之前会在应用数据目录留一份备份，想找回可以拿回来。",
   buttons: ["取消", "清空记忆并重置"],
 };

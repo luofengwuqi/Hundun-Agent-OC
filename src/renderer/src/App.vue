@@ -171,7 +171,7 @@ async function devResetMemory() {
     draft.value = ''
     chatError.value = ''
     view.value = 'chat'
-    flash('记忆已清空，备份在 ' + (r.backupDir || '应用数据目录'))
+    flash('记忆已清空，下次见面会重新认识你；备份在 ' + (r.backupDir || '应用数据目录'))
   } catch (error) {
     flash('重置失败：' + (error?.message || error))
   } finally {

@@ -98,7 +98,7 @@ export interface ShellApi {
   /** 应用自己的数据目录（诊断用）。 */
   openDataDir(): Promise<string>;
   /** 开发者选项：重置记忆。确认弹窗在主进程，取消时 canceled:true。 */
-  devResetMemory(): Promise<{ ok: boolean; canceled?: boolean; error?: string; backupDir?: string; removed: string[] }>;
+  devResetMemory(): Promise<{ ok: boolean; canceled?: boolean; error?: string; backupDir?: string; removed: string[]; bootstrapRestored?: boolean }>;
   probe(): Promise<boolean>;
   /** 无边框窗口的自绘按钮用（frame: false）。 */
   winMinimize(): void;

@@ -29,6 +29,7 @@ for (const f of ["SOUL.md", "IDENTITY.md", "USER.md", "AGENTS.md"]) {
 await writeFile(join(paths.workspace, "memory", "2026-11-19.md"), "a diary\n");
 await writeFile(join(paths.workspace, "memory", "dreaming", "x.json"), "{}\n");
 await writeFile(join(paths.workspace, "DREAMS.md"), "dream\n");
+await writeFile(join(paths.workspace, "BOOTSTRAP.md"), "old ritual\n");
 await writeFile(join(paths.dataDir, "session.json"), '{"sessionKey":"hundun-old"}\n');
 
 const r = await resetMemory(paths);
@@ -53,7 +54,13 @@ console.log("\n[4] 新会话 key");
 const session = JSON.parse(await readFile(join(paths.dataDir, "session.json"), "utf8"));
 ok(session.sessionKey !== "hundun-old" && session.sessionKey.startsWith("hundun-"), `key 已换：${session.sessionKey}`);
 
-console.log("\n[5] 路径白名单：workspace 名字不对时拒绝");
+console.log("\n[5] 仪式重新种下");
+ok(r.bootstrapRestored === true, `仪式已恢复：${r.bootstrapRestored}`);
+const ritual = await readFile(join(paths.workspace, "BOOTSTRAP.md"), "utf8");
+ok(ritual.includes("BOOTSTRAP_DONE") && ritual.length > 200, "仪式内容完整");
+ok((await readFile(join(r.backupDir, "BOOTSTRAP.md"), "utf8")) === "old ritual\n", "旧仪式在备份里");
+
+console.log("\n[6] 路径白名单：workspace 名字不对时拒绝");
 const bad = await resetMemory({ ...paths, workspace: join(root, "elsewhere") });
 ok(!bad.ok && /拒绝删除/.test(bad.error || ""), `拒绝：${bad.error}`);
 
