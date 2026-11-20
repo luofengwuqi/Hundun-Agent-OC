@@ -1,8 +1,10 @@
 {
   "name": "hundun-agent-oc",
-  "version": "0.1.0",
+  "version": "2026.4.1",
   "private": true,
   "description": "馄饨Agent-OC —— 基于 OpenClaw 的情绪陪伴桌面应用",
+  "author": "芜柒 <luofengwuqi@users.noreply.github.com>",
+  "homepage": "https://gitee.com/luofengwuqi/wonton-agent-oc",
   "main": "dist/main/main.js",
   "license": "MIT",
   "scripts": {
@@ -10,7 +12,9 @@
     "start": "npm run build && node scripts/dev-launch.mjs",
     "smoke": "node scripts/dev-engine-smoke.mjs",
     "shot": "node scripts/dev-shot.mjs",
-    "pack": "npm run build && electron-builder"
+    "pack": "npm run build && electron-builder",
+    "pack:linux": "npm run build && electron-builder --linux deb",
+    "pack:win": "npm run build && electron-builder --win nsis"
   },
   "devDependencies": {
     "@types/node": "^24.9.0",

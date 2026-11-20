@@ -89,8 +89,14 @@ export function resolveEnginePaths(input: ResolveEnginePathsInput): EnginePaths 
 
   // 打包后必须用安装包自带的 Node（D023）：Electron 自带的 Node 跑不了 node:sqlite。
   // 开发期用环境里的 node，避免为了跑一次 smoke 先复制 122 MB。
+  //
+  // 两个平台的发行版布局不一样，不能共用一条路径：
+  //   Linux   node-v24.x-linux-x64/bin/node
+  //   Windows node-v24.x-win-x64/node.exe   ← 在根上，没有 bin/
+  // 写死 bin/node 的话 Windows 包会在启动瞬间报「Node 运行时缺失」，用户只看到闪退。
+  const packagedNode = join("engine", "node", process.platform === "win32" ? "node.exe" : join("bin", "node"));
   const nodeBinary = input.isPackaged
-    ? join(input.appRoot, "engine", "node", "bin", "node")
+    ? join(input.appRoot, packagedNode)
     : (env.OPENCLAW_DEV_NODE?.trim() || "node");
 
   return {

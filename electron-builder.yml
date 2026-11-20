@@ -1,0 +1,89 @@
+# electron-builder 打包配置
+#
+# 目录约定：
+#   packaging/   图标等打包资源（不是 build/ —— 那个目录在 .gitignore 里，图标必须进 Git）
+#   engine/      随包携带的运行时（D023）：openclaw 引擎 + 各平台私有 Node
+#                不进 Git（.gitignore 已排除），打哪个平台就放哪个平台的副本
+#   release/     产物输出，不进 Git
+#
+# 关键点：主进程用 process.resourcesPath 解析引擎路径（paths.ts），所以
+# engine/ 必须落在 resources/engine/ —— 这正是 extraResources 的默认落点。
+# 放进 asar 会 spawn 不了，也会让安装包体积翻倍（asar 不分块）。
+
+appId: im.hundun.agent-oc
+productName: 馄饨Agent-OC
+copyright: Copyright © 2026 馄饨Agent-OC
+
+directories:
+  output: release
+  buildResources: packaging
+
+# 不要从 GitHub 下 Electron 二进制：本机下载会 10 分钟超时（实测 2026-11-20）。
+# 指向本地已装的副本；打 Windows 时用命令行覆盖成 Windows 版目录：
+#   electron-builder --win nsis --config.electronDist=<解压后的 electron-win 目录>
+# 注意这里必须是「解压后的目录」，不是 zip。
+electronDist: node_modules/electron/dist
+
+# 只打构建产物：渲染层已 bundle 成 app.js，运行时不需要 node_modules（vue 等都被打进去了）
+files:
+  - dist/**/*
+  - package.json
+  - "!**/*.map"
+
+extraResources:
+  - from: engine
+    to: engine
+
+asar: true
+
+# ---------- Windows ----------
+win:
+  target:
+    - target: nsis
+      arch:
+        - x64
+  icon: packaging/icon.ico
+  executableName: HundunAgent-OC
+  artifactName: HundunAgent-OC-Setup-${version}-${arch}.${ext}
+
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: 馄饨Agent-OC
+  # 卸载时保留用户数据：记忆在「文档/馄饨Agent-OC」，不在安装目录，本来就不动；
+  # 这里删的只是 <安装目录> 与 %APPDATA% 下的缓存记录。
+  deleteAppDataOnUninstall: false
+
+# ---------- Linux ----------
+linux:
+  target:
+    - target: deb
+      arch:
+        - x64
+  icon: packaging/icon.png
+  executableName: hundun-agent-oc
+  category: Utility
+  synopsis: 馄饨Agent-OC —— 情绪陪伴应用
+  description: 基于 OpenClaw 的治愈系情绪陪伴桌面应用。记忆保存在「文档/馄饨Agent-OC」，卸载不删。
+  maintainer: 芜柒 <luofengwuqi@users.noreply.github.com>
+  desktop:
+    entry:
+      Name: 馄饨Agent-OC
+      Comment: 情绪陪伴应用
+      Categories: Utility;
+  artifactName: hundun-agent-oc_${version}_${arch}.${ext}
+
+deb:
+  # 依赖按 Electron + GTK 常规组合；不写死版本号，交给各发行版解析
+  depends:
+    - libgtk-3-0
+    - libnotify4
+    - libnss3
+    - libxss1
+    - libxtst6
+    - xdg-utils
+    - libatspi2.0-0
+    - libsecret-1-0
