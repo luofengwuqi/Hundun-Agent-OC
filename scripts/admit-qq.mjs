@@ -388,6 +388,12 @@ function main() {
   const note = opts.label.trim();
 
   const cfg = readJson(configPath);
+  // ⚠️ 记下 main 的 workspace 原值。`agents add` 会顺手把 main 也登记进 roster，
+  // 并用**默认命名** `state/workspace-<id>`（即 `state/workspace-main`）填它的 workspace。
+  // 那个目录是刚铺的模板，里面是空人格 + BOOTSTRAP.md——一旦生效，馄饨会以为自己
+  // 是「刚装好的新助手」并问用户叫什么（2026-11-22 真机撞到：QQ 私聊里就是这么回复的）。
+  // 用户真正的人格与记忆在 `state/workspace`，所以这里必须把它按原值钉回去。
+  const mainWorkspaceBaseline = cfg?.agents?.entries?.main?.workspace ?? "";
   const qq = cfg?.channels?.qqbot ?? {};
   const allowFrom = Array.isArray(qq.allowFrom) ? qq.allowFrom : [];
   const bindings = Array.isArray(cfg.bindings) ? cfg.bindings : [];
@@ -526,6 +532,23 @@ function main() {
     else delete entry.identity;
   }
   next.agents.entries[agentId] = entry;
+
+  // 把 main 的 workspace 钉回原值（见上面 mainWorkspaceBaseline 的说明）。
+  // 只在「本次没有改到 main」时做：--existing-agent main 那条路本来就该原样不动。
+  if (mainWorkspaceBaseline && agentId !== "main") {
+    const mainEntry = next.agents.entries.main;
+    if (mainEntry && mainEntry.workspace !== mainWorkspaceBaseline) {
+      console.warn(
+        [
+          "⚠️ agents add 把 main 的 workspace 改成了：",
+          `   ${mainEntry.workspace}`,
+          `   已按原值钉回：${mainWorkspaceBaseline}`,
+          "   （默认命名那个目录是空模板，里面的人格会顶掉用户自己的馄饨）",
+        ].join("\n"),
+      );
+      mainEntry.workspace = mainWorkspaceBaseline;
+    }
+  }
 
   // 窄规则放前面只是给人看的；真实优先级由引擎按 specificity 判，
   // peer 级永远赢账户级（docs/concepts/agent-bindings.md「Match fields and precedence」）。

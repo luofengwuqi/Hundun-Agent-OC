@@ -1117,3 +1117,16 @@ Node 的 122 MB 只占「引擎 627 MB + Node 122 MB = 749 MB」的 **16%**。�
 - 理由：BOOTSTRAP.md 是引擎正式注入的上下文文件。留着它，朋友会被问「你希望我怎么称呼我」，agent 随后改写 `IDENTITY.md`——把用户起的名字盖掉，且让身份由第一次对话随机决定。
 - 验证：假 openid 准入后 workspace 内为 `BOOTSTRAP.md.off`，`IDENTITY.md` 保持 `persona-qq/` 的内容；引擎启动后 `agents list` 显示的 identity 来自 `IDENTITY.md`。
 - 备注：改名而非删除，一是可逆，二是本机 shell 的删除保护会拦 `rm`/`rmSync`（见 PHASE2 §7.9），删除动作会把准入流程带崩。
+
+### D036 `main` 的 `workspace` 视为不可被自动改写，脚本必须钉回
+
+- 内容：任何准入脚本执行完，`agents.entries.main.workspace` 必须与执行前**逐字相同**。被引擎或脚本改成别处时，按原值钉回并打警告；空的 `workspace-<id>` 目录一律挪走不删。
+- 状态：已确认
+- 确认人：用户
+- 确认方式：用户截图反馈「它又问我想叫什么名字」，我定位到根因后实施，用户以「继续」授权收尾
+- 确认日期：2026-11-22
+- 来源：真机事故（PHASE2 §7.19）；`openclaw agents add` 在 `agents.ownership: explicit` 下会把 `main` 一并登记并用默认命名填 `workspace`
+- 影响：`scripts/admit-qq.mjs`（`mainWorkspaceBaseline` 守卫）；`~/.config/hundun-agent-oc` 之外的 `openclaw.json`（`main.workspace` 恢复为 `state/workspace`）
+- 理由：`workspace` 指向的是「这个人是谁」——人格文件、`MEMORY.md`、会话都在那儿。指错目录不会报错，只会让 agent 变成另一个人格的陌生人，属于**静默的身份丢失**，比崩溃难发现得多。
+- 验证：改回配置并重启后，`session_entry_snapshots.systemPromptReport` 里除那条待刷新的会话外，全部 `workspaceDir: …/state/workspace`；`state/workspace-main` 已不在 `state/` 下。
+- 备注：这次的诊断入口也一并定为常规手段——查「人格注入不对」先读 `session_entry_snapshots` 的 `systemPromptReport`，不要先猜缓存。

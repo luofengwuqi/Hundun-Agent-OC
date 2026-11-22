@@ -209,6 +209,14 @@
     - 用户再发一句 → `[proactive] Recorded user: default:c2c:11C4…` → `[qqbot:api] 200 OK`；全局库 `worker_session_placements` 出现 `agent_id=main, session_key=agent:main:qqbot:direct:11c4f02a6f70a6c934e45c2548a12650`
     → 结论：**「被拦 → 回话 → 落 openid → 批准 → 路由到指定 agent」整条链在真机上成立。**
 18. **辅助模型默认要 `claude-haiku-5-5`，本项目账号没有它**。真机验证时日志出现 `model=claude-haiku-5-5 status=404 … "not available for this group"`。配置里只声明了 `deepseek-v4-1-flash`（`models.mode: merge`，其余来自远端目录）。引擎有 `agents.entries.<id>.utilityModel` 可覆盖这类辅助调用（置空字符串表示禁用）。→ 待处理，见 §9。
+19. **`agents add` 会把 `main` 登记进 roster，并用默认路径填它的 `workspace`**（2026-11-22 16:20 事故，真机上表现为「机器人失忆、重新问用户叫什么」）。
+    - 机理：`openclaw agents add <id>` 不止建新 agent，它顺手把 `main` 也写成 `agents.entries.main`（`ownership: explicit` 的语义），`workspace` 用默认命名 `<state>/workspace-<agentId>` —— 对 `main` 就是 `state/workspace-main`。那是个**全新空目录**，由引擎铺上模板 `BOOTSTRAP.md`。
+    - 表现：配置里 `main.workspace` 从 `state/workspace` 变成 `state/workspace-main`；下一轮组装上下文时注入模板 BOOTSTRAP，于是机器人「第一次认识你、问你想叫什么名字」。**记忆没丢**，它只是走错了屋子（`state/workspace-main` 里没有馄饨的 `SOUL.md` / `MEMORY.md`）。
+    - 怎么定位的：只读打开 `state/agents/main/agent/openclaw-agent.sqlite`，查 `session_entry_snapshots` 里 `field='systemPromptReport'` 的 `value_json`。同一个 agent 的十个会话里，9 个是 `workspaceDir: …/state/workspace`，只有 `agent:main:qqbot:direct:11c4f02a…` 那条是 `…/state/workspace-main`，并且带 `BOOTSTRAP.md 7475 字符`。**这张表能直接看出实际注入了哪几个人格文件、workspaceDir 是哪**，以后遇到「人格不对」先查它。
+      - 注意该表是 `(session_key, field)` 主键的 upsert 表，每个会话只有一行现值；改完配置不重开会话的话，旧值会留着，要等下一条消息那一轮才刷新。
+      - `session_nodes` 里**不存** workspaceDir，所以 workspace 是每轮从 `openclaw.json` 重新解析的——配置改对、引擎重启，下一轮就回到正确目录，不需要删会话。
+    - 处理：`main.workspace` 改回 `state/workspace`；`state/workspace-main` 整目录挪到 `/tmp`（未删，可查）；`config validate` 通过后重启。
+    - 防复发：`scripts/admit-qq.mjs` 在改配置前记下 `main.workspace` 原值（`mainWorkspaceBaseline`），写完配置再核对一遍，被 `agents add` 改了就按原值钉回并打警告。
 
 ---
 
@@ -249,4 +257,5 @@
 - **群聊「不在超过五人的大群里回答」**（用户 2026-11-20 追加）。本期群聊整渠道关闭，规则自然成立；将来开群时需要群成员数，而引擎与插件都拿不到（§7.3）。届时的备选：改为「只在指定群白名单里回答」，把人数判断交给人来批。
 - 引擎日志里的既有错误 `[cron/maintenance] Cron maintenance failed … Agent database preparation has ended: main`，与 QQ 无关，但 D014「每天一次主动关心」依赖 cron，需单独查。
 - **端到端自测的边界**：~~已验的是「拒绝分支代码行为」「准入后路由与白名单」「名册同步」，没有验过真实 QQ 消息~~ **2026-11-22 16:21 已补上真机验证**（§7.17：被拦 → 回话 → 落 openid → 批准 → 路由到 `main`）。仍未验的是**群聊**（本期整渠道关闭）与**朋友侧完整一轮对话**（`persona-qq/` 还是占位，没有人被真正批进来）。真实批准前必须由用户填好那三个文件——占位里明确写着「不要批准任何人接入」。
+- **§7.19 事故的验收点**：`main` 的 workspace 改回、重启后，需要用户在 QQ 里**再发一句**，确认它这次以馄饨的身份回话、不再问「你叫什么」。验收方式：再查一次 `session_entry_snapshots`，那条 `agent:main:qqbot:direct:…` 的 `workspaceDir` 应变回 `…/state/workspace`。
 - **辅助模型 404（§7.18）**：`claude-haiku-5-5` 在本账号不可用。要么给 `agents.entries.<id>.utilityModel` 指定 `deepseek-v4-1-flash`，要么置空禁用。影响的是辅助调用（标题/摘要/主动关心那类），不影响主对话——主对话用的 `deepseek-v4-1-flash` 是通的。**未验**：哪些具体功能受它影响。
