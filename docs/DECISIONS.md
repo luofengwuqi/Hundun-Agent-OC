@@ -1048,6 +1048,7 @@ Node 的 122 MB 只占「引擎 627 MB + Node 122 MB = 749 MB」的 **16%**。�
 | D022 | 本地目录改名（healing-agent → hundun-agent-oc） | 2026-11-13 |
 | G14 | 第十三轮（O09 改名 + 要 O08 利弊） | 2026-11-13 |
 | D023 | 私有 Node 随包捆（O08 裁决） | 2026-11-13 |
+| D034–D035 | 二期 QQ 私聊：记忆分两层（共享名册 + 各自记忆）、名字归用户（关 BOOTSTRAP） | 2026-11-20 |
 | G15 | 第十四轮（O08 裁决） | 2026-11-13 |
 
 编号一经分配永不复用；作废的保留编号并标「已作废」。
@@ -1085,3 +1086,34 @@ Node 的 122 MB 只占「引擎 627 MB + Node 122 MB = 749 MB」的 **16%**。�
 - 理由：性别不是可推断事实，猜错会直接伤到「被记住、被正确称呼」这条核心体验；用户明确要求不预设。
 - 验证：`grep` 全仓与 `state/workspace` 复核，除本条对历史的记录、以及 SOUL/AGENTS 规则本身对「她 / 他」的引用外，无对用户的性别化指代；`npm run build` 通过；人格文件由引擎在**新会话**读取，已经开着的会话需重启应用。
 - 备注：`state/workspace` 在仓库外，改动不进 Git；本轮已改 `SOUL.md`（内核与陪伴的分寸）、`AGENTS.md`（红线补一条）、`USER.md`（称呼行与 3 条档案），换机后需按本条重新写回。
+
+### D034 QQ 侧记忆分两层：共享名册 + 各自记忆；跨人只说公开事实
+
+- 内容：朋友看到的是**同一个人格**，记忆分两层。
+  - 公共层：`persona-qq/roster.md`（称呼、关系、何时进来、可公开的事实），由 `scripts/admit-qq.mjs` 复制成每个 `workspace-qq-*/NAMES.md`。脚本只在准入时补一行占位，称呼与关系由用户填。
+  - 私人层：各 workspace 自己的 `MEMORY.md` 与会话历史，互不可见（维持「一人一个 agent」）。
+  - 跨人边界：**只说名册上的公开事实，不转述任何人的心事。** 门房 `workspace-qq-gate` 不铺名册。
+- 状态：已确认
+- 确认人：用户
+- 确认方式：选项答复两轮——先问「要不要让 ai 助手像一个人一样认识所有群友」，再问跨人提人的边界，用户选「只说公开事实，不转述心事」
+- 确认日期：2026-11-20
+- 来源：用户原话；共识稿 `docs/PHASE2-QQ-PRIVATE.md` §4.1
+- 影响：`scripts/admit-qq.mjs`（新增 `appendRosterEntry` / `syncRoster` / `--sync-roster`）、`persona-qq/roster.md`（新建）、`persona-qq/AGENTS.md`（记忆节加一条）、每个朋友的 workspace 多一份 `NAMES.md`
+- 替代 / 收窄：**收窄**此前「一人一个 agent、不共用记忆」的口径——隔离不推翻，私人层仍各自独立；新增的只是公共事实层。原文不改写。
+- 理由：全共享会让 A 的心事漏给 B；全隔离则每个人都要被重新自我介绍一遍，不像「一个人」。真人的做法正好是这两层之间：记得所有朋友，但不当谈资。
+- 验证：假 openid 走完整准入 → `NAMES.md` 只铺进 1 个朋友 workspace、门房未被铺、`roster.md` 补出占位行、`config validate` 通过；`--sync-roster` 可单独重铺且不动配置。引擎无原生「联系人」能力（`user-profile-*` 是网关主人档案），故用脚本同步，未依赖未验证的能力。
+
+### D035 QQ 侧那个 agent 的名字与身份由用户定，准入时关掉 BOOTSTRAP.md
+
+- 内容：两点合并成一条，因为它们是同一个问题（谁决定「他是谁」）。
+  1. QQ 侧 agent **不叫馄饨**，也不由第一次对话命名；名字写在 `persona-qq/IDENTITY.md`，用户起。
+  2. `agents add` 铺的 `BOOTSTRAP.md` 在准入时**改名成 `BOOTSTRAP.md.off`**（不删除，可恢复），朋友第一条私聊直接遇到 `persona-qq/` 里的人格。
+- 状态：已确认（第 1 点用户当面指令；第 2 点是落地时发现的实现必要项）
+- 确认人：用户
+- 确认方式：第 1 点——用户答「QQ 上面的 agent 我来起名 你不用管」；第 2 点——实施中实测发现冲突，报告后按 D034 的同一取向落地
+- 确认日期：2026-11-20
+- 来源：用户原话；引擎 `dist/workspace-bootstrap-policy-*.mjs` 的 `DEFAULT_BOOTSTRAP_FILENAME = "BOOTSTRAP.md"`；PHASE2 §7.8
+- 影响：`scripts/admit-qq.mjs` 第 2 步；`persona-qq/IDENTITY.md`
+- 理由：BOOTSTRAP.md 是引擎正式注入的上下文文件。留着它，朋友会被问「你希望我怎么称呼我」，agent 随后改写 `IDENTITY.md`——把用户起的名字盖掉，且让身份由第一次对话随机决定。
+- 验证：假 openid 准入后 workspace 内为 `BOOTSTRAP.md.off`，`IDENTITY.md` 保持 `persona-qq/` 的内容；引擎启动后 `agents list` 显示的 identity 来自 `IDENTITY.md`。
+- 备注：改名而非删除，一是可逆，二是本机 shell 的删除保护会拦 `rm`/`rmSync`（见 PHASE2 §7.9），删除动作会把准入流程带崩。
