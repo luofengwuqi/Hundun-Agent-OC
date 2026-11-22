@@ -2,9 +2,9 @@
 
 版本：v0.2
 确认人：用户（2026-11-20 当面授权「开工」）
-更新日期：2026-11-22（v0.3：§7.8–7.15 八条实测事实；v0.2 补 §4.1 名册、§4.2 关 BOOTSTRAP）
+更新日期：2026-11-22（v0.4：§7.16 通道失败拖垮引擎、§8.1 更正旧结论；v0.3 补 §7.8–7.15）
 适用基准：AGENTS.md v0.3、DECISIONS.md v0.3（新增 D034、D035）
-状态：**已确认，实施中**。§1–§6 为达成一致的约定；§7 是实测事实；§8 仍有一项阻塞（凭据）。
+状态：**已确认，实施中**。§1–§6 为达成一致的约定；§7 是实测事实；§8 仍有一项阻塞（凭据）——缺凭据期间 `channels.qqbot.enabled = false`，见 §8.1 更正块。
 
 本文维护：二期第一步（QQ 私聊接入）的范围、角色划分、准入流程、记忆与人格归属、失败形态。
 本文不维护：需求正文（`PROJECT_PLAN.md`）、决策编号与替代关系（`DECISIONS.md`）、逐项结果（`ACCEPTANCE.md`）、工程与授权边界（根 `AGENTS.md`）。
@@ -201,6 +201,7 @@
       bash scripts/launch-desktop.sh < /dev/null > /tmp/launch.log 2>&1 &
     ```
 15. **`pkill -f "electron/dist/electron"` 会把执行它的 shell 一起杀掉**——那条命令行本身就含这个字符串。按 pid 精确杀，或把匹配串写进变量。
+16. **通道持续启动失败会把整个引擎拖垮**（2026-11-22 实测，推翻本稿 v0.1 §8.1 的旧结论）。链条：`[qqbot] channel startup failed` → health monitor 请求重启网关 → `admission closed: restart-signal fence` → 引擎退出，**壳不自动重拉** → 应用窗口还在、引擎没了，约每分钟一轮。缺凭据期间必须 `channels.qqbot.enabled = false`。详见 §8.1 的更正块。
 
 ---
 
@@ -214,7 +215,13 @@
 [qqbot] channel startup failed: Secret owner account:qqbot:default is configured but unavailable
 ```
 
-该失败**是收敛的**：HTTP 端口照常监听，主聊天不受影响。
+> **更正（2026-11-22）：本稿 v0.1 写的「该失败是收敛的：HTTP 端口照常监听，主聊天不受影响」是错的。**
+>
+> 原文保留在上面，便于比对。实际行为：通道启动失败 → health monitor 请求重启网关 → 引擎收 `admission closed: restart-signal fence` 后退出，而**壳不会自动重拉**。表现是「应用窗口还在、引擎没了」，约每分钟一次循环。实测 15:52:57 一次、15:43:28 一次。
+>
+> 处理：在拿到凭据之前，`channels.qqbot.enabled` 先设为 `false`。关闭后引擎连续稳定 2 分钟以上无新的 `admission closed`。**凭据到位后把它改回 `true`。**
+>
+> 未查的是壳为什么不重拉——`src/main/engine/supervise.ts` 的重启逻辑与引擎的 restart-signal 语义对不上，属于既有缺陷，与 QQ 无关，但 QQ 通道的持续失败把它暴露了出来。
 
 ### 8.2 用户本人的 openid
 
