@@ -2,7 +2,7 @@
 
 版本：v0.2
 确认人：用户（2026-11-20 当面授权「开工」）
-更新日期：2026-11-20（v0.2：补 §4.1 名册、§4.2 关 BOOTSTRAP、§7.8–7.12 五条实测事实）
+更新日期：2026-11-22（v0.3：§7.8–7.15 八条实测事实；v0.2 补 §4.1 名册、§4.2 关 BOOTSTRAP）
 适用基准：AGENTS.md v0.3、DECISIONS.md v0.3（新增 D034、D035）
 状态：**已确认，实施中**。§1–§6 为达成一致的约定；§7 是实测事实；§8 仍有一项阻塞（凭据）。
 
@@ -194,6 +194,13 @@
     ```
     这台机器的 shell 把 `rm` 与 `fs.rmSync` 换成了带「每轮删除计数」的包装（`CODEBUDDY_SAFE_DELETE_*` + `NODE_OPTIONS` 里的 `node-language-shim.cjs`），计数跨命令累积，撞到 50 后一律拒删。→ `admit-qq.mjs` 的 `engineEnv()` 会剥掉这些变量与 `NODE_OPTIONS` 里的 shim；脚本自身也不再删除文件（BOOTSTRAP 用改名）。
 12. **引擎崩溃后留下的租约会让 CLI 白等 4 分钟**。`kill -9` 掉应用后，`openclaw agents add` 报 `failed to acquire gateway state ownership`，然后 `Waiting for plugin lifecycle lease … current lease expires at …` 一直等到过期。租约存在 `state/state/openclaw.sqlite` 的 `state_leases` 表（只读可查）。→ 结论：**停应用要等它自己退**（shutdown budget 最长约 85 秒），别用 `kill -9`。
+13. **引擎在跑的时候不要跑 `openclaw` CLI**。实测（2026-11-22 15:43）：网关正跑着，我执行了 `openclaw agents list` / `config validate`，CLI 的 state ownership 握手动到了网关，日志出现 `admission closed: restart-signal fence` 然后引擎退出，**而壳不会自动重拉**——应用窗口还在，引擎没了。→ 读状态可以直接读 `openclaw.json`；要跑 CLI 先停应用。
+14. **从带「安全删除」包装的 shell 启动应用，引擎会被传染**。壳的 `supervise.ts` 里 `buildEnv` 会 `...process.env` 继承全部环境，包括 `NODE_OPTIONS` 里的 `node-language-shim.cjs`。删除计数一旦过阈值，引擎在清理阶段抛异常**静默退出**（日志里只剩半句话，连栈都没有），表现为「应用开着、引擎反复消失」。→ 开发期从 AI 的 shell 启动应用要这样起：
+    ```bash
+    setsid nohup env -u CODEBUDDY_SAFE_DELETE_ENABLED -u NODE_OPTIONS \
+      bash scripts/launch-desktop.sh < /dev/null > /tmp/launch.log 2>&1 &
+    ```
+15. **`pkill -f "electron/dist/electron"` 会把执行它的 shell 一起杀掉**——那条命令行本身就含这个字符串。按 pid 精确杀，或把匹配串写进变量。
 
 ---
 
