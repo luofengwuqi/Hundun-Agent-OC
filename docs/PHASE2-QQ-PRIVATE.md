@@ -2,9 +2,9 @@
 
 版本：v0.2
 确认人：用户（2026-11-20 当面授权「开工」）
-更新日期：2026-11-22（v0.4：§7.16 通道失败拖垮引擎、§8.1 更正旧结论；v0.3 补 §7.8–7.15）
+更新日期：2026-11-22（v0.5：凭据到位、真机链路打通 §7.17、辅助模型 404 §7.18；状态行同步）
 适用基准：AGENTS.md v0.3、DECISIONS.md v0.3（新增 D034、D035）
-状态：**已确认，实施中**。§1–§6 为达成一致的约定；§7 是实测事实；§8 仍有一项阻塞（凭据）——缺凭据期间 `channels.qqbot.enabled = false`，见 §8.1 更正块。
+状态：**私聊链路已打通（真机验证）**。§1–§6 为约定；§7 是实测事实；§8.1 凭据阻塞已解除。剩余：朋友侧人格待用户填写、辅助模型 404 待处理、群聊未开。
 
 本文维护：二期第一步（QQ 私聊接入）的范围、角色划分、准入流程、记忆与人格归属、失败形态。
 本文不维护：需求正文（`PROJECT_PLAN.md`）、决策编号与替代关系（`DECISIONS.md`）、逐项结果（`ACCEPTANCE.md`）、工程与授权边界（根 `AGENTS.md`）。
@@ -202,12 +202,23 @@
     ```
 15. **`pkill -f "electron/dist/electron"` 会把执行它的 shell 一起杀掉**——那条命令行本身就含这个字符串。按 pid 精确杀，或把匹配串写进变量。
 16. **通道持续启动失败会把整个引擎拖垮**（2026-11-22 实测，推翻本稿 v0.1 §8.1 的旧结论）。链条：`[qqbot] channel startup failed` → health monitor 请求重启网关 → `admission closed: restart-signal fence` → 引擎退出，**壳不自动重拉** → 应用窗口还在、引擎没了，约每分钟一轮。缺凭据期间必须 `channels.qqbot.enabled = false`。详见 §8.1 的更正块。
+17. **真机链路已通（2026-11-22 16:15–16:21，凭据到位后）**。逐步记录，都可在日志里复核：
+    - `[qqbot:token:1906476274] Background refresh started` → `[qqbot:api] <<< Status: 200 OK` → `[qqbot] gateway READY`（重启后为 `gateway RESUMED`）
+    - 用户私聊机器人（此时不在白名单）→ 补丁落盘 `state/qqbot-pending.jsonl`：`{"openid":"11C4F02A6F70A6C934E45C2548A12650","at":"2026-11-22T08:18:53.454Z"}`，同时收到中文拒绝语
+    - `node scripts/admit-qq.mjs --openid 11C4… --existing-agent main --label 我自己的QQ` → `allowFrom` 只剩这个真 openid（占位被清）、binding 为 peer 级指向 `main`
+    - 用户再发一句 → `[proactive] Recorded user: default:c2c:11C4…` → `[qqbot:api] 200 OK`；全局库 `worker_session_placements` 出现 `agent_id=main, session_key=agent:main:qqbot:direct:11c4f02a6f70a6c934e45c2548a12650`
+    → 结论：**「被拦 → 回话 → 落 openid → 批准 → 路由到指定 agent」整条链在真机上成立。**
+18. **辅助模型默认要 `claude-haiku-5-5`，本项目账号没有它**。真机验证时日志出现 `model=claude-haiku-5-5 status=404 … "not available for this group"`。配置里只声明了 `deepseek-v4-1-flash`（`models.mode: merge`，其余来自远端目录）。引擎有 `agents.entries.<id>.utilityModel` 可覆盖这类辅助调用（置空字符串表示禁用）。→ 待处理，见 §9。
 
 ---
 
 ## 8. 未决
 
 ### 8.1 【阻塞】QQ 开放平台凭据
+
+> **已解除（2026-11-22 16:15）。** 用户在 q.qq.com 取得 AppID `1906476274` 与 AppSecret，写入 `~/.config/hundun-agent-oc/secrets.json`（0600，与模型 key 同文件，合并写入不覆盖）；`channels.qqbot.enabled` 改回 `true`；`config validate` 通过（QQ 相关两条 warning 消失）。引擎启动后通道 `gateway READY`，重启后 `RESUMED`。真机验证记录见 §7.17。
+>
+> 下文是凭据到位前的原始记录，保留用于说明当时卡在哪。
 
 需要在 [q.qq.com](https://q.qq.com/) 建机器人，取 AppID / AppSecret，消息接收方式设为 WebSocket。当前 `channels.qqbot` 已配好骨架，但引擎每次启动都停在：
 
@@ -237,4 +248,5 @@
 - ~~`qq-gate` 门房 agent 尚未创建（§2）~~ **已建**，兜底 binding `qqbot accountId=*` 指向它，`main` 无显式规则（走默认）。
 - **群聊「不在超过五人的大群里回答」**（用户 2026-11-20 追加）。本期群聊整渠道关闭，规则自然成立；将来开群时需要群成员数，而引擎与插件都拿不到（§7.3）。届时的备选：改为「只在指定群白名单里回答」，把人数判断交给人来批。
 - 引擎日志里的既有错误 `[cron/maintenance] Cron maintenance failed … Agent database preparation has ended: main`，与 QQ 无关，但 D014「每天一次主动关心」依赖 cron，需单独查。
-- **端到端自测的边界**：已验的是「拒绝分支代码行为」「准入后路由与白名单」「名册同步」，**没有验过真实 QQ 消息进来**（缺凭据）。真实批准前还必须由用户填好 `persona-qq/` 三个文件——现在是占位，占位里明确写着「不要批准任何人接入」。
+- **端到端自测的边界**：~~已验的是「拒绝分支代码行为」「准入后路由与白名单」「名册同步」，没有验过真实 QQ 消息~~ **2026-11-22 16:21 已补上真机验证**（§7.17：被拦 → 回话 → 落 openid → 批准 → 路由到 `main`）。仍未验的是**群聊**（本期整渠道关闭）与**朋友侧完整一轮对话**（`persona-qq/` 还是占位，没有人被真正批进来）。真实批准前必须由用户填好那三个文件——占位里明确写着「不要批准任何人接入」。
+- **辅助模型 404（§7.18）**：`claude-haiku-5-5` 在本账号不可用。要么给 `agents.entries.<id>.utilityModel` 指定 `deepseek-v4-1-flash`，要么置空禁用。影响的是辅助调用（标题/摘要/主动关心那类），不影响主对话——主对话用的 `deepseek-v4-1-flash` 是通的。**未验**：哪些具体功能受它影响。

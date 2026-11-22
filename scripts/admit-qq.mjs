@@ -100,7 +100,7 @@ function die(code, message) {
 }
 
 function parseArgs(argv) {
-  const out = { openid: "", label: "", home: "", dryRun: false, engine: "", force: false, syncRoster: false, agentId: "" };
+  const out = { openid: "", label: "", home: "", dryRun: false, engine: "", force: false, syncRoster: false, agentId: "", existingAgent: "" };
   for (let i = 0; i < argv.length; i += 1) {
     const a = argv[i];
     if (a === "--openid") out.openid = argv[++i] ?? "";
@@ -111,6 +111,7 @@ function parseArgs(argv) {
     else if (a === "--force") out.force = true;
     else if (a === "--sync-roster") out.syncRoster = true;
     else if (a === "--agent-id") out.agentId = argv[++i] ?? "";
+    else if (a === "--existing-agent") out.existingAgent = argv[++i] ?? "";
     else if (a === "-h" || a === "--help") {
       console.log(
         [
@@ -125,6 +126,7 @@ function parseArgs(argv) {
           "  --dry-run     只打印计划，不写任何文件",
           "  --force       人格里出现「" + PROTECTED_NAME + "」也照样铺（默认拒绝）",
           "  --agent-id    自定义 agentId（默认 qq-<openid 前 8 位>；前缀撞了就用它）",
+          "  --existing-agent  绑到**已经存在**的 agent（如 main），不建新 agent、不铺人格、不写名册",
           "  --sync-roster 只把 persona-qq/" + ROSTER_SRC + " 重铺成各 workspace 的 " + NAMES_FILENAME,
           "                （改了名册、或删了人之后跑这个，不动配置）",
         ].join("\n"),
@@ -324,53 +326,61 @@ function main() {
   if (!existsSync(join(engineRoot, "dist", "index.js"))) {
     die(2, `找不到引擎入口：${join(engineRoot, "dist", "index.js")}（用 --engine 指一下）`);
   }
-  if (!existsSync(personaDir)) {
-    die(
-      2,
-      [
-        `找不到 QQ 侧人格目录：${personaDir}`,
-        "",
-        "这个目录是**你**的活，不由脚本生成。按共识稿 §2 建好并放入：",
-        `  ${PERSONA_FILES.map((f) => join(personaDir, f)).join("\n  ")}`,
-        "",
-        "内容要写「朋友遇到的这个人」，不是馄饨——馄饨只属于用户自己。",
-      ].join("\n"),
-    );
-  }
-  const missing = PERSONA_FILES.filter((f) => !existsSync(join(personaDir, f)));
-  if (missing.length > 0) {
-    die(2, `QQ 侧人格目录缺文件：${missing.join("、")}\n  目录：${personaDir}`);
-  }
 
-  // 人格来源守卫：馄饨只属于用户。铺错源的话朋友会以为自己在跟「用户的馄饨」说话，
-  // 而这套设计里它们不是同一个东西（共识稿 §2）。宁可拒绝，也不要静默铺错。
-  const tainted = PERSONA_FILES.filter((f) => {
-    try {
-      return readFileSync(join(personaDir, f), "utf8").includes(PROTECTED_NAME);
-    } catch {
-      return false;
+  // 「绑到已存在的 agent」是给**用户自己**用的：他的 QQ 私聊要走 `main`（馄饨本人），
+  // 不该为他自己再建一个 agent、也不该铺 QQ 侧人格、更不该进名册。
+  // 所以人格目录、人格守卫、BOOTSTRAP、名册全部跳过，只做 binding + allowFrom。
+  const linkExisting = opts.existingAgent.trim();
+
+  if (!linkExisting) {
+    if (!existsSync(personaDir)) {
+      die(
+        2,
+        [
+          `找不到 QQ 侧人格目录：${personaDir}`,
+          "",
+          "这个目录是**你**的活，不由脚本生成。按共识稿 §2 建好并放入：",
+          `  ${PERSONA_FILES.map((f) => join(personaDir, f)).join("\n  ")}`,
+          "",
+          "内容要写「朋友遇到的这个人」，不是馄饨——馄饨只属于用户自己。",
+        ].join("\n"),
+      );
     }
-  });
-  if (tainted.length > 0 && !opts.force) {
-    die(
-      2,
-      [
-        `人格文件里出现了「${PROTECTED_NAME}」：${tainted.join("、")}`,
-        "",
-        `「${PROTECTED_NAME}」只属于用户自己，不复制给任何人（共识稿 §2）。`,
-        "朋友遇到的是 QQ 侧这个人格，如果它自称馄饨，对方会以为在跟用户的那个说话，",
-        "而实际上记忆是分开的——那是欺骗，不是设定。",
-        "",
-        "改掉人格里的名字后重跑；确认要这么干就加 --force。",
-      ].join("\n"),
-    );
+    const missing = PERSONA_FILES.filter((f) => !existsSync(join(personaDir, f)));
+    if (missing.length > 0) {
+      die(2, `QQ 侧人格目录缺文件：${missing.join("、")}\n  目录：${personaDir}`);
+    }
+
+    // 人格来源守卫：馄饨只属于用户。铺错源的话朋友会以为自己在跟「用户的馄饨」说话，
+    // 而这套设计里它们不是同一个东西（共识稿 §2）。宁可拒绝，也不要静默铺错。
+    const tainted = PERSONA_FILES.filter((f) => {
+      try {
+        return readFileSync(join(personaDir, f), "utf8").includes(PROTECTED_NAME);
+      } catch {
+        return false;
+      }
+    });
+    if (tainted.length > 0 && !opts.force) {
+      die(
+        2,
+        [
+          `人格文件里出现了「${PROTECTED_NAME}」：${tainted.join("、")}`,
+          "",
+          `「${PROTECTED_NAME}」只属于用户自己，不复制给任何人（共识稿 §2）。`,
+          "朋友遇到的是 QQ 侧这个人格，如果它自称馄饨，对方会以为在跟用户的那个说话，",
+          "而实际上记忆是分开的——那是欺骗，不是设定。",
+          "",
+          "改掉人格里的名字后重跑；确认要这么干就加 --force。",
+        ].join("\n"),
+      );
+    }
   }
 
   // agentId 用 openid 前 8 位：稳定、可 grep、不把整个 openid 摊在目录名里。
   // 但前 8 位**可能撞**（自测时就撞过：两个假 openid 都以 SELFTEST 开头）。
   // 撞了的后果不是报错，而是两个人并进同一个 agent = 记忆隔离直接失效，
   // 所以下面要显式拦一次；`--agent-id` 是撞了之后的逃生口。
-  const agentId = opts.agentId.trim() || `qq-${openid.slice(0, 8).toLowerCase()}`;
+  const agentId = linkExisting || opts.agentId.trim() || `qq-${openid.slice(0, 8).toLowerCase()}`;
   const workspaceDir = join(stateDir, `workspace-${agentId}`);
   // `--label` 只进 binding 的 comment（给人看的备注），**绝不写进 agent 的 name**。
   // 原因：`agents.entries.*.name` 是 agent 的身份名，会盖过 workspace 里的
@@ -387,6 +397,15 @@ function main() {
   const alreadyBound = bindings.some(
     (b) => b?.agentId === agentId && b?.match?.peer?.id === openid,
   );
+
+  // --existing-agent 的前提是它真的存在。写错名字的话会往配置里塞一条指向空气的
+  // binding，引擎不报错，消息到了直接没人接——所以要在这里拦住。
+  if (linkExisting && !alreadyAgent) {
+    die(
+      2,
+      `没有这个 agent：${linkExisting}\n  现有：${Object.keys(cfg?.agents?.entries ?? {}).join("、")}`,
+    );
+  }
 
   // 前缀碰撞守卫：这个 agentId 已经绑了**别人**的 openid，就说明前 8 位撞了。
   // 放过去的话两个人的私聊会落进同一个 workspace / 同一个 sqlite，
@@ -410,9 +429,11 @@ function main() {
 
   console.log("计划：");
   console.log(`  引擎 home     ${home}`);
-  console.log(`  agent         ${agentId}${alreadyAgent ? "（已存在，跳过创建）" : ""}`);
-  console.log(`  workspace     ${workspaceDir}`);
-  console.log(`  人格来源      ${personaDir}（${PERSONA_FILES.join(" / ")}）`);
+  console.log(`  agent         ${agentId}${linkExisting ? "（已存在，只加路由）" : alreadyAgent ? "（已存在，跳过创建）" : ""}`);
+  if (!linkExisting) {
+    console.log(`  workspace     ${workspaceDir}`);
+    console.log(`  人格来源      ${personaDir}（${PERSONA_FILES.join(" / ")}）`);
+  }
   console.log(`  白名单        ${alreadyAllowed ? "已在" : "追加"} ${openid}`);
   console.log(`  路由 binding  ${alreadyBound ? "已在，跳过" : "新增 peer:direct 绑定"}`);
   console.log(`  群聊          ${qq.groupPolicy === "disabled" ? "已禁用（本期不做群）" : "⚠️ 未禁用"}`);
@@ -423,8 +444,9 @@ function main() {
   }
 
   // ── 第 1 步：建 agent。这一步会连带铺 workspace 模板、.git、agent sqlite ──
+  // 绑已有 agent（main）时整段跳过：那个人的人格与记忆已经在那儿了。
   let createdAgent = false;
-  if (!alreadyAgent) {
+  if (!linkExisting && !alreadyAgent) {
     const r = runEngine(engineRoot, home, [
       "agents",
       "add",
@@ -444,10 +466,14 @@ function main() {
 
   // ── 第 2 步：覆盖人格。模板铺的是空白人格，不覆盖就不是那个人 ──
   // 故意不复制 USER.md：那是**这个朋友**的画像，要从空白开始，由他自己聊出来。
-  for (const name of PERSONA_FILES) {
-    const from = join(personaDir, name);
-    if (!existsSync(from)) continue;
-    copyFileSync(from, join(workspaceDir, name));
+  // ⚠️ 只在**新建** agent 时铺。绑已有 agent（main）时不能碰它的人格——
+  // 那是用户自己的馄饨，被 QQ 侧那套盖掉就是把用户的人格改了。
+  if (!linkExisting) {
+    for (const name of PERSONA_FILES) {
+      const from = join(personaDir, name);
+      if (!existsSync(from)) continue;
+      copyFileSync(from, join(workspaceDir, name));
+    }
   }
   // 关掉 `agents add` 铺的 BOOTSTRAP.md。引擎会把它当正式上下文注入，
   // 留着的结果是朋友第一次私聊被问「你希望我怎么称呼我」，然后 agent 自己写
@@ -459,12 +485,17 @@ function main() {
   //      把整个准入流程带崩（实测：agent 建好了，配置没写，留下半个状态）。
   //   2. 可逆。用户想恢复默认的身份确认流程，把 .off 改回来就行。
   // 引擎按精确文件名 BOOTSTRAP.md 找文件，加后缀即失效。
-  const bootstrapPath = join(workspaceDir, "BOOTSTRAP.md");
-  const hadBootstrap = existsSync(bootstrapPath);
-  if (hadBootstrap) renameSync(bootstrapPath, `${bootstrapPath}.off`);
-  console.log(
-    `✓ 人格已铺进 workspace（${PERSONA_FILES.join("、")}）${hadBootstrap ? "，BOOTSTRAP.md 已关掉（改名 .off，可恢复）" : ""}`,
-  );
+  if (!linkExisting) {
+    const bootstrapPath = join(workspaceDir, "BOOTSTRAP.md");
+    const hadBootstrap = existsSync(bootstrapPath);
+    if (hadBootstrap) renameSync(bootstrapPath, bootstrapPath + ".off");
+    console.log(
+      "✓ 人格已铺进 workspace（" +
+        PERSONA_FILES.join("、") +
+        "）" +
+        (hadBootstrap ? "，BOOTSTRAP.md 已关掉（改名 .off，可恢复）" : ""),
+    );
+  }
 
   // ── 第 3、4 步：改配置。先备份，写完校验，校验不过就回滚 ──
   //
@@ -541,21 +572,33 @@ function main() {
   // ── 第 5 步：名册。新来的人先在 roster.md 占一行（称呼/关系留给你填），
   //            然后把整份名册铺进每个人的 workspace。放在校验之后：
   //            配置没过就不该在名册上留半个名字。
-  if (appendRosterEntry(personaDir, agentId, note)) {
-    console.log(`✓ 名册加了占位一行（称呼和关系待你补：${join(personaDir, ROSTER_SRC)}）`);
+  //            绑已有 agent 时整段跳过——用户自己不进「朋友名册」。
+  if (!linkExisting) {
+    if (appendRosterEntry(personaDir, agentId, note)) {
+      console.log(`✓ 名册加了占位一行（称呼和关系待你补：${join(personaDir, ROSTER_SRC)}）`);
+    }
+    const synced = syncRoster(stateDir, personaDir);
+    console.log(`✓ 名册已铺到 ${synced} 个 workspace（${NAMES_FILENAME}）`);
+
+    console.log(
+      [
+        "",
+        "完成。启动应用后，这个人的第一条私聊会落到他自己的 workspace：",
+        `  ${workspaceDir}`,
+        "他一开口遇到的就是你在 persona-qq 写的那个人格，不会有人问他「你叫我什么」。",
+        "他的记忆只在这个目录里，和别人互不可见；他知道其他人是谁，但不知道别人的心事。",
+        "",
+        "记得把名册里的占位补上：称呼、和你的关系、可以公开聊的事实。",
+      ].join("\n"),
+    );
+    return;
   }
-  const synced = syncRoster(stateDir, personaDir);
-  console.log(`✓ 名册已铺到 ${synced} 个 workspace（${NAMES_FILENAME}）`);
 
   console.log(
     [
       "",
-      "完成。启动应用后，这个人的第一条私聊会落到他自己的 workspace：",
-      `  ${workspaceDir}`,
-      "他一开口遇到的就是你在 persona-qq 写的那个人格，不会有人问他「你叫我什么」。",
-      "他的记忆只在这个目录里，和别人互不可见；他知道其他人是谁，但不知道别人的心事。",
-      "",
-      "记得把名册里的占位补上：称呼、和你的关系、可以公开聊的事实。",
+      `完成。这个 openid 的 QQ 私聊现在路由到 ${agentId}（已存在的 agent，人格与记忆都没动）。`,
+      "启动应用后直接私聊机器人即可，走的是那个 agent 原本的会话。",
     ].join("\n"),
   );
 }
