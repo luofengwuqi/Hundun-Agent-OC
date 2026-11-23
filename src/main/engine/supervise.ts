@@ -82,7 +82,14 @@ export async function probeReady(port: number, timeoutMs = 1500): Promise<boolea
   }
 }
 
-function buildEnv(
+/**
+ * 引擎子进程的环境变量。
+ *
+ * 导出是给 `channels.ts` 用的：通道补启动要起一次性的 CLI 子进程，那个子进程必须看到
+ * 和引擎完全一样的环境（同一份 STATE_DIR / CONFIG / 凭据），否则它会去连另一个网关，
+ * 或者因为缺 `QQBOT_APP_ID` 而起不来——那种失败看起来像「补启动没生效」。
+ */
+export function buildEngineEnv(
   paths: EnginePaths,
   port: number,
   secrets: Readonly<Record<string, string>> = {},
@@ -206,7 +213,7 @@ export async function startEngine(options: StartOptions): Promise<EngineHandle> 
   log(`[shell] 引擎日志 ${logFile}`);
 
   const child: ChildProcess = spawn(paths.nodeBinary, args, {
-    env: buildEnv(paths, port, options.secrets),
+    env: buildEngineEnv(paths, port, options.secrets),
     stdio: ["ignore", "pipe", "pipe"],
     // 不经 shell：这是信号能直达引擎的前提（SHELL-SKELETON §3.5）。
     shell: false,

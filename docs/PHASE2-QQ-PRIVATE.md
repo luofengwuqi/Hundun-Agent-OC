@@ -404,7 +404,7 @@ suppressing channel/provider account auto-start.
 
 本次现场处置：`gateway call channels.start --params '{"channel":"qqbot"}'` → `started: true`，6 秒后 `channels status` 变成 `running, connected`，日志出现 `[qqbot] [default] [default] gateway READY`。
 
-**未做的（等用户定）**：壳没有在重拉后自动补这一步。理由是那等于绕过上游刻意设的断路器——壳体自己判断「这次不是通道的错」并不总是成立。要不要补，见 §11.7 的待定项。
+壳要不要在重拉后自动补这一步，问过用户后选了「条件自动补」，见 §11.7。
 
 ### 11.6 未验
 
@@ -412,12 +412,37 @@ suppressing channel/provider account auto-start.
 - 「手机端在引擎重启期间发消息」的行为未测：这段时间引擎不在，QQ 通道会掉，消息可能丢。重拉只保证引擎回来，不保证消息不丢。
 - 崩溃循环上限目前是硬编码 5 次 + 5 分钟清零，没有做成设置项。
 
-### 11.7 待用户定：重拉成功后要不要自动把通道拉起来
+### 11.7 通道补启动（D039，2026-11-23 用户选定）
 
-两条路，成本差别不大（都是壳起一个一次性 CLI 子进程），差别在语义：
+三个候选摆在用户面前：只报告不动手 / 无条件自动补 / **条件自动补**（选中）。理由是语义而不是成本——只报告意味着人在手机上等回复时根本不知道发生了什么；无条件补则是壳长期替引擎判断该不该绕过断路器，引擎想拦也拦不住，而它拦的正是「反复崩的东西不该无限重试」。
 
-- **A. 只报告不动手**：重拉成功后查 `channels status`，发现该跑的通道没跑就在界面 notice 里说明，并给出可复制的命令。尊重上游断路器，但用户得自己去终端执行——在手机上等回复的人不会知道发生了什么。
-- **B. 自动补启动**：重拉成功后若发现通道被压住，直接 `channels.start`。用户无感，QQ 立刻恢复。代价是壳在替引擎判断「该不该绕过断路器」。
-- **C. 折中**：只在「本次重拉是壳自己发起的、且引擎已就绪、且未触发壳的 crash-loop 上限」这三个条件同时成立时才补启动，并把每次补启动写进引擎日志。
+**实现**：新增 `src/main/engine/channels.ts`。
+
+- `recoverChannels()` 起一次性 CLI 子进程跑 `gateway call channels.status`（返回干净 JSON，比 `channels status` 的文本好解析），挑出 `enabled && configured && !running` 的通道，逐个 `gateway call channels.start --params '{"channel":"<id>"}'`。
+- 触发条件在 `main.ts` 的 `pendingChannelRecovery`：只在 `scheduleRestart`（自动重拉）与 `shell:restart-engine`（用户点重启）里置位；引擎就绪后消费一次。**普通启动不做**。
+- 三个坑都撞过：
+  1. CLI 默认按配置里的 18789 找网关，壳是用 `--port` 另起的 → 必须把 `OPENCLAW_GATEWAY_PORT` 塞进子进程环境，否则连不上然后报 ECONNREFUSED，看起来像「补启动没生效」。
+  2. 子进程要用**和引擎完全同一份环境**（`buildEngineEnv` 导出复用）——`channels.qqbot.appId` 这类值来自环境变量（`QQBOT_APP_ID`），漏了它通道起不来。
+  3. 就绪到通道真正起来之间有几秒空档，所以要 `SETTLE_MS = 6s` 之后再查，否则把「正在启动」误判成「被压住」，白拉一次。
+- 失败不改 `status`、不抛异常：这是引擎已经起来之后的补救动作，失败只往引擎日志追加一行。
+- 查之前等的 6 秒从「引擎就绪」算起，不是从 spawn 算——实测 spawn 15:48:01 → 就绪约 15:48:27 → 补启动 15:48:33，正是这个形状。
+
+**实测**（2026-11-23 23:46–23:50，本机）：先确认干净启动时通道自己就是 `running, connected`，然后连杀 3 次把引擎断路器打跳闸。日志证据：
+
+```
+15:48:01.147 [shell] spawn … gateway run … --port 18890
+15:48:20.438 [qqbot] channel autostart suppressed by crash-loop breaker; refusing automatic start for qqbot
+15:48:33.613 [shell] 通道 qqbot 自动补启动：已交给引擎（handed-off）
+15:48:46.335 [shell] spawn …（第 3 次重拉）
+15:49:04.824 [qqbot] channel autostart suppressed by crash-loop breaker; …
+15:49:19.738 [shell] 通道 qqbot 自动补启动：已交给引擎（handed-off）
+```
+
+收尾查 `channels.status`：`qqbot running=True connected=True lastError=None`。**「断路器压住 → 壳补启动 → 通道恢复」这条链是端到端验过的，不是推的。**
+
+顺带说明为什么第 1 次重拉时没有补启动日志：那时通道还没被压住，自己就起来了，`running` 已是 `true`，壳不去碰它——这也顺带证明「正在跑的一律不动」这条生效。
+
+**仍未覆盖**：用户在断路器窗口内**手动关掉再打开应用**（不是壳发起的重启），通道依然会被压住，壳按本决策不做补启动。遇到时的临时办法是点界面上的「重启引擎」——那算壳发起的重启，会补。
+
 
 

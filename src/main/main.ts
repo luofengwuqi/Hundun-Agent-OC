@@ -8,7 +8,7 @@
  *      所以这一步留到下一版，宁可界面上明说「还没接」。
  */
 import { app, BrowserWindow, dialog, ipcMain, shell, Tray, Menu, nativeImage, Notification } from "electron";
-import { readFile, writeFile } from "node:fs/promises";
+import { readFile, writeFile, appendFile } from "node:fs/promises";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
@@ -38,7 +38,8 @@ import { normalize, moveModel, addModel, removeModel, setProviderModels } from "
 import { ensureOpencode } from "./engine/claudeconfig";
 import { probeModels } from "./engine/modelprobe";
 import { applyModelConfig } from "./engine/modelapply";
-import { findAdoptableEngine, probeReady, startEngine, clearRuntimeRecord, type EngineHandle, type RuntimeRecord } from "./engine/supervise";
+import { findAdoptableEngine, probeReady, startEngine, clearRuntimeRecord, buildEngineEnv, type EngineHandle, type RuntimeRecord } from "./engine/supervise";
+import { recoverChannels } from "./engine/channels";
 import { findFreePort } from "./engine/port";
 import { resetMemory, RESET_NOTICE } from "./engine/memoryreset";
 import {
@@ -96,6 +97,15 @@ let stableTimer: NodeJS.Timeout | undefined;
  * 不知道刚才掉过线。日志里有，但界面也该留一句。
  */
 let lastCrashNote: string | null = null;
+/**
+ * 下一次引擎就绪后，要不要顺带查一遍通道并把该跑的拉起来。
+ *
+ * 只在**壳自己发起**的重启上置位：引擎自带的断路器会因为「5 分钟内 3 次不干净启动」
+ * 压住所有通道的自动启动（详见 engine/channels.ts 的注释），而壳的退避序列全在
+ * 那个窗口内，所以「重拉成功但 QQ 不回话」是必然组合，必须补一手。
+ * 但不接在普通启动上——那等于壳长期替引擎判断该不该绕过它的断路器。
+ */
+let pendingChannelRecovery = false;
 /** 当前配置里的默认模型 ref（未配置时为 undefined）。 */
 let modelRef: string | undefined;
 /** 是否已有可选用的凭据。 */
@@ -363,6 +373,8 @@ function scheduleRestart(code: number | null): void {
   }
 
   restartAttempts += 1;
+  // 让下一次就绪去查一遍通道：引擎自己的断路器很可能已经把 qqbot 的 autostart 压住了
+  pendingChannelRecovery = true;
   lastCrashNote = `陪伴引擎刚才自己退出（code=${String(code)}），已自动重启 ${restartAttempts} 次。详情见引擎日志。`;
   state = {
     ...state,
@@ -387,6 +399,23 @@ function markEngineStable(): void {
   }, STABLE_RESET_MS);
 }
 
+/**
+ * 把壳的补充动作写进引擎日志。
+ *
+ * 日志文件由 supervise 的 sink 建好，这里只追加。写不进去（磁盘满、文件被挪）
+ * 不该影响主流程——补启动本身是补救动作，不是必须成功的路径。
+ */
+async function appendEngineLog(file: string | undefined, lines: readonly string[]): Promise<void> {
+  if (!file || lines.length === 0) return;
+  const stamp = new Date().toISOString();
+  const text = `${lines.map((line) => `${stamp} ${line}`).join("\n")}\n`;
+  try {
+    await appendFile(file, text, { mode: 0o600 });
+  } catch {
+    // 见注释
+  }
+}
+
 async function bootEngine(): Promise<void> {
   if (!paths) return;
   state = { ...emptyState(), status: "starting" };
@@ -404,6 +433,9 @@ async function bootEngine(): Promise<void> {
   // 上一次壳崩了但引擎还活着 → 接管，而不是再起一个（SHELL-SKELETON §4.2）。
   const adoptable = await findAdoptableEngine(paths.runtimeRecord);
   if (adoptable) {
+    // 接管的是已经在跑的引擎，通道早就在它自己身上跑着——补启动的由头不成立，
+    // 把标志清掉，免得它被带到下一次真正的启动里。
+    pendingChannelRecovery = false;
     state = {
       ...emptyState(),
       status: "ready",
@@ -452,6 +484,24 @@ async function bootEngine(): Promise<void> {
     lastCrashNote = null;
     broadcast();
     markEngineStable();
+
+    /*
+     * 重拉成功 ≠ 服务恢复。
+     *
+     * 引擎自带断路器：5 分钟内攒够 3 次不干净启动就压住所有通道的自动启动
+     * （engine/channels.ts 顶部有源码依据）。壳的退避序列全在那个窗口里，所以
+     * 「崩了几次之后被拉回来」这个组合几乎一定伴随「通道没起来」——用户看到的
+     * 就是 QQ 一条都不回，和 2026-11-23 21:06 那次一模一样。
+     *
+     * 只在壳自己发起重启时补（pendingChannelRecovery），并且引擎已就绪才查。
+     */
+    if (pendingChannelRecovery) {
+      pendingChannelRecovery = false;
+      const logFile = engine.logFile;
+      void recoverChannels({ paths, port, env: buildEngineEnv(paths, port, secrets) })
+        .then((lines) => appendEngineLog(logFile, lines))
+        .catch(() => undefined);
+    }
   } catch (error) {
     const failure = (error as { failure?: EngineFailure }).failure;
     state = {
@@ -485,6 +535,9 @@ function registerIpc(): void {
   ipcMain.handle("shell:restart-engine", async () => {
     // 用户手动重启＝重新给额度，否则之前自动重试用掉的次数会一直压着他。
     restartAttempts = 0;
+    // 手动重启也是「壳发起的重启」，同样要补一手通道：用户点这个按钮的时候
+    // 通常正因为「QQ 不回话」，而断路器可能还压着通道。
+    pendingChannelRecovery = true;
     if (restartTimer) {
       clearTimeout(restartTimer);
       restartTimer = undefined;
