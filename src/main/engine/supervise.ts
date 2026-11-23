@@ -12,9 +12,9 @@
  *   - 退出码 78 = 配置无效，绝不重试。
  */
 import { spawn, type ChildProcess } from "node:child_process";
-import { existsSync } from "node:fs";
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
-import { delimiter, dirname, isAbsolute } from "node:path";
+import { createWriteStream, existsSync, statSync } from "node:fs";
+import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { delimiter, dirname, isAbsolute, join } from "node:path";
 import { classifyExit, classifyStartupFailure, type EngineFailure } from "./errors";
 import type { EnginePaths } from "./paths";
 
@@ -43,12 +43,21 @@ export interface StartOptions {
    */
   readonly secrets?: Readonly<Record<string, string>>;
   readonly onLog?: (line: string) => void;
+  /**
+   * 引擎**在就绪之后**自己退出了（不是我们 stop 的）。壳据此决定要不要自动重拉。
+   *
+   * 为什么必须有这个回调：2026-11-23 21:06 引擎自己退出，窗口还开着，
+   * 用户看到的就是「QQ 不回话」，而壳一直不知道引擎已经没了，白等了两个多小时。
+   */
+  readonly onUnexpectedExit?: (info: { code: number | null; signal: NodeJS.Signals | null }) => void;
 }
 
 export interface EngineHandle {
   readonly status: EngineStatus;
   readonly port: number;
   readonly pid: number | undefined;
+  /** 引擎日志文件路径（按天，见 openEngineLog）。排障时先看它。 */
+  readonly logFile: string;
   stop(): Promise<void>;
   logs(): readonly string[];
 }
@@ -134,12 +143,49 @@ export async function clearRuntimeRecord(path: string): Promise<void> {
   await rm(path, { force: true });
 }
 
+/**
+ * 按天建引擎日志文件；同一份超过 5MB 就滚成 `.1`（只留一代，够看死因）。
+ *
+ * 为什么写这儿而不是 dataDir：它和 `state/logs/stability` 那几个崩溃快照是一类东西，
+ * 都属于「引擎自己的运行记录」，放一起排障时不用两头找。
+ */
+async function openEngineLog(paths: EnginePaths): Promise<string> {
+  const dir = join(paths.stateDir, "logs");
+  await mkdir(dir, { recursive: true });
+  const day = new Date().toISOString().slice(0, 10);
+  const file = join(dir, `engine-${day}.log`);
+  try {
+    if (statSync(file).size > 5 * 1024 * 1024) await rename(file, `${file}.1`);
+  } catch {
+    // 不存在就是第一次写，正常
+  }
+  return file;
+}
+
 export async function startEngine(options: StartOptions): Promise<EngineHandle> {
   const { paths, port, token } = options;
   const ring: string[] = [];
 
   await mkdir(paths.engineHome, { recursive: true });
   await mkdir(paths.workspace, { recursive: true });
+
+  // 引擎日志落盘（2026-11-23 加）。此前只进主进程的内存环，引擎一死环就跟着消失，
+  // 「为什么死的」永远查不到——21:06 那次就是这样，只能靠文件 mtime 猜死亡时间。
+  const logFile = await openEngineLog(paths);
+  const sink = createWriteStream(logFile, { flags: "a", mode: 0o600 });
+  // 写盘失败（磁盘满、目录被挪走）不该把壳带崩：日志是排障工具，不是生命线，
+  // 丢了就退回「只有内存环」。没有这个监听器，WriteStream 的 error 事件会直接抛。
+  let sinkBroken = false;
+  sink.on("error", () => {
+    sinkBroken = true;
+  });
+  /** 同时进内存环（界面日志面板）与磁盘。 */
+  const log = (line: string): void => {
+    const trimmed = line.replace(/\s+$/, "");
+    if (trimmed.length === 0) return;
+    if (!sinkBroken) sink.write(`${new Date().toISOString()} ${trimmed}\n`);
+    pushLog(ring, line, options.onLog);
+  };
 
   const args = [
     paths.engineEntry,
@@ -156,7 +202,8 @@ export async function startEngine(options: StartOptions): Promise<EngineHandle> 
   ];
   if (options.allowUnconfigured) args.push("--allow-unconfigured");
 
-  pushLog(ring, `[shell] spawn ${paths.nodeBinary} ${args.join(" ")}`, options.onLog);
+  log(`[shell] spawn ${paths.nodeBinary} ${args.join(" ")}`);
+  log(`[shell] 引擎日志 ${logFile}`);
 
   const child: ChildProcess = spawn(paths.nodeBinary, args, {
     env: buildEnv(paths, port, options.secrets),
@@ -172,22 +219,30 @@ export async function startEngine(options: StartOptions): Promise<EngineHandle> 
   child.stdout?.setEncoding("utf8");
   child.stderr?.setEncoding("utf8");
   child.stdout?.on("data", (chunk: string) => {
-    for (const line of chunk.split("\n")) pushLog(ring, line, options.onLog);
+    for (const line of chunk.split("\n")) log(line);
   });
   child.stderr?.on("data", (chunk: string) => {
-    for (const line of chunk.split("\n")) pushLog(ring, line, options.onLog);
+    for (const line of chunk.split("\n")) log(line);
   });
 
   const exited = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve) => {
     child.once("exit", (code, signal) => {
       exitInfo = { code, signal };
-      if (status !== "stopping") status = "failed";
+      // ⚠️ 先取快照再改状态：改完再判断就永远是「不是 ready」了。
+      const wasReady = status === "ready";
+      const stopping = status === "stopping";
+      if (!stopping) status = "failed";
+      log(`[shell] 引擎退出 code=${String(code)} signal=${String(signal)}${stopping ? "（我们停的）" : ""}`);
+      sink.end();
+      // 只有「就绪之后自己退出」才通知壳去重拉；启动阶段失败走上面的异常分支。
+      if (wasReady && !stopping) options.onUnexpectedExit?.({ code, signal });
       resolve({ code, signal });
     });
     child.once("error", (error) => {
-      pushLog(ring, `[shell] spawn error: ${String(error)}`, options.onLog);
+      log(`[shell] spawn error: ${String(error)}`);
       exitInfo = { code: null, signal: null };
       status = "failed";
+      sink.end();
       resolve({ code: null, signal: null });
     });
   });
@@ -248,6 +303,7 @@ export async function startEngine(options: StartOptions): Promise<EngineHandle> 
       return status;
     },
     port,
+    logFile,
     get pid() {
       return child.pid;
     },
@@ -255,7 +311,7 @@ export async function startEngine(options: StartOptions): Promise<EngineHandle> 
     async stop() {
       if (status === "stopped" || status === "failed") return;
       status = "stopping";
-      pushLog(ring, "[shell] SIGTERM", options.onLog);
+      log("[shell] SIGTERM");
       child.kill("SIGTERM");
 
       const graceful = await Promise.race([
@@ -264,7 +320,7 @@ export async function startEngine(options: StartOptions): Promise<EngineHandle> 
       ]);
 
       if (!graceful) {
-        pushLog(ring, `[shell] ${STOP_TIMEOUT_MS} ms 内未退出，SIGKILL`, options.onLog);
+        log(`[shell] ${STOP_TIMEOUT_MS} ms 内未退出，SIGKILL`);
         child.kill("SIGKILL");
         await exited.catch(() => undefined);
       }

@@ -14,6 +14,9 @@ export type EngineFailureKind =
   | "startup-timeout" // 迟迟不 ready
   | "assets-missing" // 安装包缺文件
   | "state-locked" // 状态目录被另一个实例占着
+  // 就绪之后反复自己退出，退避重试额度用完 → 壳已停止自动重启。
+  // 和 "retryable" 的区别：那个是「值得再试一次」，这个是「试满次数了，别再试」。
+  | "crash-loop"
   | "unknown";
 
 export interface EngineFailure {

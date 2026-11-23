@@ -73,6 +73,29 @@ let state: ShellState = emptyState();
 let engine: EngineHandle | undefined;
 let paths: EnginePaths | undefined;
 let mainWindow: BrowserWindow | undefined;
+
+/**
+ * 引擎自己退出后自动重拉的退避序列（毫秒）。
+ *
+ * 为什么要有这个：2026-11-23 21:06 引擎自己退了，窗口一直开着，用户看到的表现是
+ * 「QQ 不回话」，而壳完全没意识到引擎已经没了——白等了 2 小时 20 分。
+ * 序列用完（5 次）就不再试：反复失败的引擎不该被无限重启，那只会把用户困在
+ * 「一直在转圈」里，还刷满日志。
+ */
+const RESTART_DELAYS_MS: readonly number[] = [2_000, 5_000, 10_000, 20_000, 30_000];
+/** 引擎稳定跑这么久之后，把「重试次数」清零——中途真崩了还有额度可用。 */
+const STABLE_RESET_MS = 5 * 60_000;
+let restartAttempts = 0;
+let restartTimer: NodeJS.Timeout | undefined;
+let stableTimer: NodeJS.Timeout | undefined;
+/**
+ * 上一次自动重拉的原因，只给「重拉成功后」用一次。
+ *
+ * 为什么留着：bootEngine 开头会把 state 清成 starting、成功后又清成 ready，
+ * 崩溃提示会被这两次重置抹掉，用户只看到窗口「闪了一下又能说话了」，
+ * 不知道刚才掉过线。日志里有，但界面也该留一句。
+ */
+let lastCrashNote: string | null = null;
 /** 当前配置里的默认模型 ref（未配置时为 undefined）。 */
 let modelRef: string | undefined;
 /** 是否已有可选用的凭据。 */
@@ -299,6 +322,71 @@ function publicState(): Record<string, unknown> {
   };
 }
 
+/**
+ * 引擎在**就绪之后**自己退出了（不是我们停的）。决定：重拉，还是认栽。
+ *
+ * 判据只有两条：退出码 78（配置不合法）绝不重试——重启一百次还是同一个错，
+ * 只会把用户按在反复失败里；其余情况按退避序列重拉，用完额度就停下并说明原因。
+ */
+function scheduleRestart(code: number | null): void {
+  if (quitting || restartTimer) return;
+
+  if (code === 78) {
+    state = {
+      ...state,
+      status: "failed",
+      failure: {
+        kind: "config-invalid",
+        retryable: false,
+        userMessage: "配置不合法，陪伴引擎已停止。修好配置再重启，反复重启没有意义。",
+      },
+    };
+    broadcast();
+    return;
+  }
+
+  const delay = RESTART_DELAYS_MS[restartAttempts];
+  if (delay === undefined) {
+    const logHint = engine?.logFile ? `日志在 ${engine.logFile}` : "日志在 state/logs/ 下";
+    state = {
+      ...state,
+      status: "failed",
+      failure: {
+        kind: "crash-loop",
+        // 额度用完了，壳不再自动重试（不是「不重试就完蛋」——用户仍可手动点重启）
+        retryable: false,
+        userMessage: `陪伴引擎连续 ${RESTART_DELAYS_MS.length} 次自己退出，已停止自动重启。${logHint}`,
+      },
+    };
+    broadcast();
+    return;
+  }
+
+  restartAttempts += 1;
+  lastCrashNote = `陪伴引擎刚才自己退出（code=${String(code)}），已自动重启 ${restartAttempts} 次。详情见引擎日志。`;
+  state = {
+    ...state,
+    status: "starting",
+    pid: null,
+    notice: `陪伴引擎意外退出了（code=${String(code)}），${Math.round(delay / 1000)} 秒后自动重启（第 ${restartAttempts} 次）…`,
+  };
+  broadcast();
+
+  restartTimer = setTimeout(() => {
+    restartTimer = undefined;
+    void bootEngine();
+  }, delay);
+}
+
+/** 引擎就绪：先记「活了多久」，稳定 5 分钟就把重试额度还回来。 */
+function markEngineStable(): void {
+  if (stableTimer) clearTimeout(stableTimer);
+  stableTimer = setTimeout(() => {
+    stableTimer = undefined;
+    restartAttempts = 0;
+  }, STABLE_RESET_MS);
+}
+
 async function bootEngine(): Promise<void> {
   if (!paths) return;
   state = { ...emptyState(), status: "starting" };
@@ -348,15 +436,22 @@ async function bootEngine(): Promise<void> {
       onLog: (line) => {
         sendToWindow("shell:log", line);
       },
+      // 就绪之后自己退出 → 自动重拉（见 scheduleRestart）。
+      onUnexpectedExit: ({ code }) => {
+        scheduleRestart(code);
+      },
     });
     state = {
       ...emptyState(),
       status: "ready",
       port,
       pid: engine.pid ?? null,
-      notice: seed.warnings.length > 0 ? seed.warnings.join("\n") : null,
+      // 崩溃提示只消费一次：重拉成功后留一句，之后归位到 seed 的告警
+      notice: [lastCrashNote, seed.warnings.join("\n")].filter(Boolean).join("\n") || null,
     };
+    lastCrashNote = null;
     broadcast();
+    markEngineStable();
   } catch (error) {
     const failure = (error as { failure?: EngineFailure }).failure;
     state = {
@@ -388,6 +483,12 @@ function registerIpc(): void {
   ipcMain.handle("shell:get-state", () => currentStatus());
 
   ipcMain.handle("shell:restart-engine", async () => {
+    // 用户手动重启＝重新给额度，否则之前自动重试用掉的次数会一直压着他。
+    restartAttempts = 0;
+    if (restartTimer) {
+      clearTimeout(restartTimer);
+      restartTimer = undefined;
+    }
     if (engine) {
       await engine.stop();
       engine = undefined;
@@ -915,6 +1016,15 @@ app.on("activate", () => {
 let quitting = false;
 app.on("before-quit", (event) => {
   shuttingDown = true;
+  // 退出时先把自动重启的定时器清掉，否则它可能在收尾期间又把引擎拉起来。
+  if (restartTimer) {
+    clearTimeout(restartTimer);
+    restartTimer = undefined;
+  }
+  if (stableTimer) {
+    clearTimeout(stableTimer);
+    stableTimer = undefined;
+  }
   if (quitting || !engine) return;
   event.preventDefault();
   quitting = true;

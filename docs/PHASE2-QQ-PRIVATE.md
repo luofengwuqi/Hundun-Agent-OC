@@ -257,11 +257,11 @@
 - ~~`scripts/admit-qq.mjs` 现版本会把 `state/workspace/` 的馄饨人格复制给新人~~ **已改**，读 `persona-qq/`，并加「馄饨」守卫（人格里出现该词就拒绝铺，除非 `--force`）。
 - ~~`qq-gate` 门房 agent 尚未创建（§2）~~ **已建**，兜底 binding `qqbot accountId=*` 指向它，`main` 无显式规则（走默认）。
 - **群聊「不在超过五人的大群里回答」**（用户 2026-11-20 追加）。本期群聊整渠道关闭，规则自然成立；将来开群时需要群成员数，而引擎与插件都拿不到（§7.3）。届时的备选：改为「只在指定群白名单里回答」，把人数判断交给人来批。
-- 引擎日志里的既有错误 `[cron/maintenance] Cron maintenance failed … Agent database preparation has ended: main`，与 QQ 无关，但 D014「每天一次主动关心」依赖 cron，需单独查。
+- 引擎日志里的既有错误 `[cron/maintenance] Cron maintenance failed … Agent database preparation has ended: main`，与 QQ 无关，但 D014「每天一次主动关心」依赖 cron，需单独查。日志自 2026-11-23 23:34 起落盘（§11.2），下次出现可以直接 `grep`。
 - **端到端自测的边界**：~~已验的是「拒绝分支代码行为」「准入后路由与白名单」「名册同步」，没有验过真实 QQ 消息~~ **2026-11-22 16:21 已补上真机验证**（§7.17：被拦 → 回话 → 落 openid → 批准 → 路由到 `main`）。仍未验的是**群聊**（本期整渠道关闭）与**朋友侧完整一轮对话**（`persona-qq/` 还是占位，没有人被真正批进来）。真实批准前必须由用户填好那三个文件——占位里明确写着「不要批准任何人接入」。
 - ~~**§7.19 事故的验收点**：`main` 的 workspace 改回、重启后，需要用户在 QQ 里**再发一句**~~ **2026-11-23 19:54 已验收通过**。用户在 QQ 里发「你是谁」，回复是「是馄饨，一只住在终端里的小馄饨…」。快照复核：那条 `agent:main:qqbot:direct:11c4f02a…` 的 `workspaceDir` 已回到 `…/state/workspace`，`injectedWorkspaceFiles` 是 `AGENTS.md`(779) / `SOUL.md`(1103) / `IDENTITY.md`(187)，**没有 `BOOTSTRAP.md`**。
   - 遗留的小瑕疵：同一会话里还留着 11-22 16:20 那条走错屋子的回答，所以这次它顺嘴编了一句「上次还问过你该叫什么名字，看来你已经给它起好了」——它在**给自己的上一次故障找解释**。记忆没断，但那一轮的记录是脏的。会话只有 4 句话，要清可以清；不清也不影响后续。
-- ~~**辅助模型 404（§7.18）**~~ **已改配置，未验效果**：`agents.defaults.utilityModel = "anthropic/deepseek-v4-1-flash"`（放 `defaults` 而不是 `main`，将来 `qq-*` 一起受益）。语义依引擎源码 `utility-model-DOwPP7zp.mjs` 的 `readUtilityModelSetting`：不写 = `auto`（按插件清单派生，`claude-haiku-5-5` 即由此而来）、空串 = `disabled`、非空 = `explicit`。`config validate` 通过。**未验**：404 是否真的消失——引擎日志不进磁盘（只在应用的日志面板环里），要等下一次辅助调用时在面板里看。
+- ~~**辅助模型 404（§7.18）**~~ **已改配置，未验效果**：`agents.defaults.utilityModel = "anthropic/deepseek-v4-1-flash"`（放 `defaults` 而不是 `main`，将来 `qq-*` 一起受益）。语义依引擎源码 `utility-model-DOwPP7zp.mjs` 的 `readUtilityModelSetting`：不写 = `auto`（按插件清单派生，`claude-haiku-5-5` 即由此而来）、空串 = `disabled`、非空 = `explicit`。`config validate` 通过。**未验**：404 是否真的消失——原先引擎日志不进磁盘（只在应用的日志面板环里）没法事后回看；自 2026-11-23 23:34 起日志落盘到 `state/logs/engine-<day>.log`（§11.2），下次辅助调用可以直接查。
 
 
 ---
@@ -321,3 +321,103 @@ Multiple agents are configured, but this operation has no explicit owner.
 - **界面渲染没有肉眼验证**：本机 CDP 调试端口（19222）能连但不回包，`dev-shot.mjs` 拿不到截图。已验的是：构建通过、打包产物里 `hx-day` 出现 2 次（新增块）、`loadRemoteChat` 存在、`readRemoteTurns` 用真实库跑出正确结果（含时间戳、空会话返回空）。
 - 手机发一句 → 桌面 20 秒内应出现「手机上聊的」一块。**这一步要用户配合才能验。**
 - 两端同时说话时的排队行为未测。
+
+
+---
+
+## 11. 引擎自己死了怎么办（2026-11-23）
+
+### 11.1 事故
+
+23:06 用户报「qq没连上」。查下来：Electron 窗口还开着，`openclaw gateway` 进程已经不存在，18890 端口无响应。距离引擎实际退出（文件 mtime 约 20:46）已经空了**两个多小时**，期间壳一直以为自己是好的。
+
+**真因没查到**，而且查不到这件事本身是设计缺陷：引擎日志只写进主进程的内存环（`LOG_RING_LINES = 200`），壳不重启就不会落盘，旧实例一被杀，环里的东西连同上一次死因一起消失。`dmesg` 无 OOM 记录、`openclaw.json` 的 mtime 停在 20:16、`state/logs/stability` 里没有新崩溃快照——三条路都断在「没证据」上。
+
+### 11.2 两件事（用户选「两件都做」）
+
+**一、日志落盘。** `src/main/engine/supervise.ts` 的 `log()` 从「只进环」改成「同时进环和磁盘」：
+
+- 路径 `state/logs/engine-<YYYY-MM-DD>.log`，`0600`，追加写。放 `state/logs/` 而不是 `dataDir`：它和 `stability/` 那批崩溃快照是同一类东西（引擎自己的运行记录），排障时不用两头找。
+- 单份超 5MB 滚成 `.log.1`，只留一代——够看死因即可，不做日志轮转框架。
+- 写盘失败（磁盘满、目录被挪走）只置一个 `sinkBroken` 标志退回纯内存，不把壳带崩。没有这个监听器，`WriteStream` 的 `error` 事件会当未捕获异常直接抛。
+- 壳自己的动作（spawn 命令行、退出码、信号）也写进同一个文件，并带 `[shell]` 前缀，所以「谁先死」一眼能看出。
+
+**二、意外退出自动重拉。** 分两层：
+
+`supervise.ts` 只在**就绪之后**被非壳方杀掉时回调 `onUnexpectedExit({code, signal})`。实现上有个必须注意的顺序：退出回调里先取 `wasReady` 快照再改 `status`，反过来写就永远是「不是 ready」。启动阶段失败不走这条路，它仍然抛异常给 `bootEngine` 的 `catch`。
+
+`main.ts` 的 `scheduleRestart(code)` 决定重拉还是认栽，判据只有两条：
+
+| 情况 | 动作 |
+| --- | --- |
+| `code === 78`（EX_CONFIG） | **绝不重试**，直接 failed 并让用户去修配置。上游用 78 就是为了阻断重启循环，喂给自动重试等于把断路器废掉 |
+| 其余 | 按 `[2s, 5s, 10s, 20s, 30s]` 退避重拉，每拉一次 +1 |
+| 序列用完 | 停下，`kind: "crash-loop"`，提示里附日志路径 |
+
+额度会还回来：引擎就绪后起一个 5 分钟定时器，跑满 5 分钟就把 `restartAttempts` 清零——中途真崩了还有 5 次可用。定时器在每次成功启动时重置，`before-quit` 与手动重启里清掉。
+
+崩溃提示只消费一次：`bootEngine` 开头把 state 清成 `starting`、成功后又清成 `ready`，两次重置会把提示抹掉，用户只看到窗口「闪了一下又能说话」。所以用 `lastCrashNote` 存一句，重新就绪时并进 `notice`，用完即清。
+
+### 11.4 实测（2026-11-23 23:34–23:39，本机）
+
+对着真实引擎连杀 6 次，读 `state/logs/engine-2026-11-23.log` 的 `[shell]` 行：
+
+| 第几次 | 退出时刻 (UTC) | 重新 spawn | 实际间隔 | 序列值 |
+| --- | --- | --- | --- | --- |
+| 1 | 15:35:04.603 | 15:35:06.623 | 2.02 s | 2 s |
+| 2 | 15:35:37.576 | 15:35:42.595 | 5.02 s | 5 s |
+| 3 | 15:36:10.959 | 15:36:20.983 | 10.02 s | 10 s |
+| 4 | 15:36:58.839 | 15:37:18.868 | 20.03 s | 20 s |
+| 5 | 15:37:44.004 | 15:38:14.027 | 30.02 s | 30 s |
+| 6 | 15:38:39.529 | **没有** | — | 额度用完，停 |
+
+第 6 次之后：无引擎进程、`/readyz` 无响应、Electron 壳仍在运行——正是「停下并把原因说出来」的预期形态。
+
+日志本身：应用启动即生成文件，171 行 / 19KB → 23.7KB（引擎启动阶段输出全在），壳的 spawn 与退出记录逐条递增。
+
+### 11.5 这次实测挖出来的东西：引擎有它自己的断路器，重拉成功 ≠ QQ 回来
+
+**这条是本次最重要的发现，比功能本身重要。**
+
+杀到第 3 次之后，引擎日志开始出现：
+
+```
+[qqbot] channel autostart suppressed by crash-loop breaker; refusing automatic start for qqbot.
+```
+
+`channels status` 也直说了：
+
+```
+QQ Bot default: enabled, reason:configuration status unavailable,
+error:gateway restart-loop breaker tripped: 5 unclean boot(s) within 300000ms;
+suppressing channel/provider account auto-start.
+```
+
+读引擎源码（`dist/gateway-boot-lifecycle.kernel-BKdHuusn.mjs`、`dist/gateway-boot-lifecycle-B_E2PbYI.mjs`）：
+
+- 判据在 state 库的 `gateway_boot_lifecycle` 表：`completed_at_ms IS NULL` 或 `outcome='startup_failed'` 记为**一次不干净启动**。
+- `GATEWAY_BOOT_LOOP_UNCLEAN_THRESHOLD = 3`、`GATEWAY_BOOT_LOOP_WINDOW_MS = 300_000`。**5 分钟内 3 次不干净启动 → 断路器跳闸**。
+- 跳闸后它压的不是网关本身，是**所有通道的自动启动**。自带解除：等窗口排空（`latestUncleanAtMs + 5min`），再下一次重启才恢复 autostart——不会在进程活着的时候自己把通道拉起来。
+- 它给的手动出口就是一句命令：`openclaw gateway call channels.start --params '{"channel":"qqbot"}'`。
+
+**为什么这很要命**：壳的退避序列 2/5/10/20/30 秒全部落在 5 分钟窗口内。一次真实的连续故障里，只要崩够 3 次，就会出现「引擎回来了、`/readyz` 200、壳显示一切正常，但 QQ 一条都不回」——**和 21:06 那次用户看到的现象一模一样，只是成因不同**。所以 §11.2 的两件事解决了「引擎不在」，没解决「引擎在但通道被压住」。
+
+本次现场处置：`gateway call channels.start --params '{"channel":"qqbot"}'` → `started: true`，6 秒后 `channels status` 变成 `running, connected`，日志出现 `[qqbot] [default] [default] gateway READY`。
+
+**未做的（等用户定）**：壳没有在重拉后自动补这一步。理由是那等于绕过上游刻意设的断路器——壳体自己判断「这次不是通道的错」并不总是成立。要不要补，见 §11.7 的待定项。
+
+### 11.6 未验
+
+- **界面文案没肉眼验证**：本机是 Wayland 会话，Electron 渲染成原生 Wayland 窗口，X11 的 `import`（ImageMagick）截不到；CDP 端口仍然不回包。已验证的是代码路径——`crash-loop` 走的是和其他 failure 完全相同的 `status: "failed" + failure` 渲染分支，没有新增界面代码。
+- 「手机端在引擎重启期间发消息」的行为未测：这段时间引擎不在，QQ 通道会掉，消息可能丢。重拉只保证引擎回来，不保证消息不丢。
+- 崩溃循环上限目前是硬编码 5 次 + 5 分钟清零，没有做成设置项。
+
+### 11.7 待用户定：重拉成功后要不要自动把通道拉起来
+
+两条路，成本差别不大（都是壳起一个一次性 CLI 子进程），差别在语义：
+
+- **A. 只报告不动手**：重拉成功后查 `channels status`，发现该跑的通道没跑就在界面 notice 里说明，并给出可复制的命令。尊重上游断路器，但用户得自己去终端执行——在手机上等回复的人不会知道发生了什么。
+- **B. 自动补启动**：重拉成功后若发现通道被压住，直接 `channels.start`。用户无感，QQ 立刻恢复。代价是壳在替引擎判断「该不该绕过断路器」。
+- **C. 折中**：只在「本次重拉是壳自己发起的、且引擎已就绪、且未触发壳的 crash-loop 上限」这三个条件同时成立时才补启动，并把每次补启动写进引擎日志。
+
+
