@@ -217,6 +217,8 @@
       - `session_nodes` 里**不存** workspaceDir，所以 workspace 是每轮从 `openclaw.json` 重新解析的——配置改对、引擎重启，下一轮就回到正确目录，不需要删会话。
     - 处理：`main.workspace` 改回 `state/workspace`；`state/workspace-main` 整目录挪到 `/tmp`（未删，可查）；`config validate` 通过后重启。
     - 防复发：`scripts/admit-qq.mjs` 在改配置前记下 `main.workspace` 原值（`mainWorkspaceBaseline`），写完配置再核对一遍，被 `agents add` 改了就按原值钉回并打警告。
+20. **引擎日志不落盘，只在应用的日志面板里（内存环）**。`~/.cache/hundun-agent-oc/launch-*.log` 只有构建输出与 Electron 自己的 GPU 报错；`state/logs/` 里只有 `stability/` 那几份崩溃快照。所以「刚才那条 404 还在不在」这类问题，查文件查不到，得看应用面板。→ 想复核通道/模型行为，改用数据库：`channel_ingress_events`（入站）、`diagnostic_events`（配置审计等）、`session_entry_snapshots`（注入内容）。
+21. **`setsid nohup … &` 在本次会话环境里会被连坐杀掉**（2026-11-23 19:52 实测）。现象极干净：重定向的日志文件**根本没有生成**、脚本自己的 `~/.cache/hundun-agent-oc/launch-*.log` 也没生成、没有任何进程——说明脚本从未执行。同一条命令在 11-22 是好使的。→ 起应用改用当前工具自带的后台执行，或用 `--dry-run` 先确认环境，再起。
 
 ---
 
@@ -257,5 +259,7 @@
 - **群聊「不在超过五人的大群里回答」**（用户 2026-11-20 追加）。本期群聊整渠道关闭，规则自然成立；将来开群时需要群成员数，而引擎与插件都拿不到（§7.3）。届时的备选：改为「只在指定群白名单里回答」，把人数判断交给人来批。
 - 引擎日志里的既有错误 `[cron/maintenance] Cron maintenance failed … Agent database preparation has ended: main`，与 QQ 无关，但 D014「每天一次主动关心」依赖 cron，需单独查。
 - **端到端自测的边界**：~~已验的是「拒绝分支代码行为」「准入后路由与白名单」「名册同步」，没有验过真实 QQ 消息~~ **2026-11-22 16:21 已补上真机验证**（§7.17：被拦 → 回话 → 落 openid → 批准 → 路由到 `main`）。仍未验的是**群聊**（本期整渠道关闭）与**朋友侧完整一轮对话**（`persona-qq/` 还是占位，没有人被真正批进来）。真实批准前必须由用户填好那三个文件——占位里明确写着「不要批准任何人接入」。
-- **§7.19 事故的验收点**：`main` 的 workspace 改回、重启后，需要用户在 QQ 里**再发一句**，确认它这次以馄饨的身份回话、不再问「你叫什么」。验收方式：再查一次 `session_entry_snapshots`，那条 `agent:main:qqbot:direct:…` 的 `workspaceDir` 应变回 `…/state/workspace`。
-- **辅助模型 404（§7.18）**：`claude-haiku-5-5` 在本账号不可用。要么给 `agents.entries.<id>.utilityModel` 指定 `deepseek-v4-1-flash`，要么置空禁用。影响的是辅助调用（标题/摘要/主动关心那类），不影响主对话——主对话用的 `deepseek-v4-1-flash` 是通的。**未验**：哪些具体功能受它影响。
+- ~~**§7.19 事故的验收点**：`main` 的 workspace 改回、重启后，需要用户在 QQ 里**再发一句**~~ **2026-11-23 19:54 已验收通过**。用户在 QQ 里发「你是谁」，回复是「是馄饨，一只住在终端里的小馄饨…」。快照复核：那条 `agent:main:qqbot:direct:11c4f02a…` 的 `workspaceDir` 已回到 `…/state/workspace`，`injectedWorkspaceFiles` 是 `AGENTS.md`(779) / `SOUL.md`(1103) / `IDENTITY.md`(187)，**没有 `BOOTSTRAP.md`**。
+  - 遗留的小瑕疵：同一会话里还留着 11-22 16:20 那条走错屋子的回答，所以这次它顺嘴编了一句「上次还问过你该叫什么名字，看来你已经给它起好了」——它在**给自己的上一次故障找解释**。记忆没断，但那一轮的记录是脏的。会话只有 4 句话，要清可以清；不清也不影响后续。
+- ~~**辅助模型 404（§7.18）**~~ **已改配置，未验效果**：`agents.defaults.utilityModel = "anthropic/deepseek-v4-1-flash"`（放 `defaults` 而不是 `main`，将来 `qq-*` 一起受益）。语义依引擎源码 `utility-model-DOwPP7zp.mjs` 的 `readUtilityModelSetting`：不写 = `auto`（按插件清单派生，`claude-haiku-5-5` 即由此而来）、空串 = `disabled`、非空 = `explicit`。`config validate` 通过。**未验**：404 是否真的消失——引擎日志不进磁盘（只在应用的日志面板环里），要等下一次辅助调用时在面板里看。
+
