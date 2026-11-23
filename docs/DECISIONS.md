@@ -1130,3 +1130,20 @@ Node 的 122 MB 只占「引擎 627 MB + Node 122 MB = 749 MB」的 **16%**。�
 - 理由：`workspace` 指向的是「这个人是谁」——人格文件、`MEMORY.md`、会话都在那儿。指错目录不会报错，只会让 agent 变成另一个人格的陌生人，属于**静默的身份丢失**，比崩溃难发现得多。
 - 验证：改回配置并重启后，`session_entry_snapshots.systemPromptReport` 里除那条待刷新的会话外，全部 `workspaceDir: …/state/workspace`；`state/workspace-main` 已不在 `state/` 下。
 - 备注：这次的诊断入口也一并定为常规手段——查「人格注入不对」先读 `session_entry_snapshots` 的 `systemPromptReport`，不要先猜缓存。
+
+### D037 桌面与 QQ 共用一段会话；手机端看不到电脑上的话这件事如实说明
+
+- 内容：三件事一起定。
+  1. **会话合一**：`session.dmScope = "main"`，QQ 私聊与桌面窗口都写进 `agent:main:main`。它对你的记忆只有一份。
+  2. **桌面显示全部**：界面除本地 `chat-history.json` 外，再把引擎转写里另一端说的话显示成「手机上聊的」一块，**只显示、不进上下文**。
+  3. **不追求「两端界面一样」**：QQ 客户端只显示真实收发的消息，电脑上说的话手机端永远不会出现。这条写在文档最前面，不当作待办。
+- 状态：已确认
+- 确认人：用户
+- 确认方式：选项答复——「记忆合一 + 桌面看全部」「不迁，新会话开始」
+- 确认日期：2026-11-23
+- 来源：用户原话「有没有办法让聊天记录自动同步？」；引擎源码 `buildAgentPeerSessionKey` 的 `dmScope` 分支；PHASE2 §10
+- 影响：`~/文档/馄饨Agent-OC/openclaw.json`（`session.dmScope`）、`src/main/main.ts`（`SESSION_KEY` / `readSessionKey` / `remoteSince`）、`src/main/engine/chat.ts`（`model: "openclaw/main"`）、`src/main/engine/memoryreset.ts`（新键前缀）、新增 `src/main/engine/transcript.ts`、`App.vue` 新增「手机上聊的」块
+- 替代 / 收窄：**收窄** §2「一人一个 agent」只约束「人与人之间」；同一个人跨设备共用会话不违反它。旧的那句「桌面端自己一份历史、引擎自己一份记忆」的说法作废——现在历史仍分两份，但会话与记忆是同一段。
+- 理由：用户要的「同步」本质是**记忆一致**（在哪说过它都记得）。界面一致受腾讯客户端限制，只能在桌面侧单向补齐；把这件事说清楚，比做一个「两端看起来一样」的假象诚实。
+- 验证：会话键统一后实测「只发一条 user、不带历史，仍能答出前面说过的内容」；全量重发不产生重复上下文（问它列出看到的用户消息，只列 3 条）。
+- 备注：顺带修掉一个真 bug——多 agent 之后桌面端用 `model: "openclaw/default"` 会被引擎拒（`Multiple agents are configured…`），自 2026-11-22 起桌面聊天实际不可用，改成 `openclaw/main` 恢复。界面渲染未经肉眼验证（本机 CDP 不回包），已如实记在 PHASE2 §10.7。

@@ -29,7 +29,8 @@ import type { EnginePaths } from "./paths";
 import { BOOTSTRAP_FILE, ensureBootstrap } from "./bootstrap";
 
 const SESSION_FILE = "session.json";
-const SESSION_PREFIX = "hundun-";
+/** 新会话键的前缀：`agent:main:hundun-<uuid>`。带 `agent:` 才是引擎的完整键名。 */
+const SESSION_PREFIX = "agent:main:hundun-";
 const USER_FILE = "USER.md";
 /** 结构化称呼档案（R3）。它和 USER.md 一样属于「关于这个人」的内容，重置必须一起清。 */
 const PROFILE_FILE = "profile.json";
@@ -146,7 +147,7 @@ export async function resetMemory(paths: EnginePaths): Promise<MemoryResetResult
     removed.push("workspace/profile.json（确认过的称呼）");
 
     // 换新 session key：引擎下次对话就是全新会话，不再带着旧记忆。
-    // SESSION_PREFIX + uuid：和默认 hundun-main 同形状，readSessionKey 直接认。
+    // 形状与默认的 `agent:main:main` 一致（都以 `agent:` 开头），readSessionKey 直接认。
     const freshKey = `${SESSION_PREFIX}${randomUUID()}`;
     await mkdir(resolve(paths.dataDir), { recursive: true });
     await writeFile(sessionPath, `${JSON.stringify({ sessionKey: freshKey }, null, 2)}\n`, { mode: 0o600 });

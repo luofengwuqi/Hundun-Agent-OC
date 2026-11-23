@@ -37,6 +37,11 @@ const scroller = ref(null)
  * 进程重启后由 restoreHistory() 落盘回读填上，不是每次进来看见空白。
  */
 const turns = ref([])
+/**
+ * 从引擎转写里补回来的「别处说过的话」（手机 QQ）。
+ * 只显示，不进上下文；与本地 turns 重叠的按内容去重。
+ */
+const remoteTurns = ref([])
 const draft = ref('')
 const sending = ref(false)
 const chatError = ref('')
@@ -109,6 +114,17 @@ const opening = computed(() => {
 })
 
 let timer = null
+/** 拉取「别处说过的话」的定时器；手机上说的话不会推事件过来。 */
+let remoteTimer = null
+
+/**
+ * 只显示本地没说过的那几条，否则同一句话会出现两遍
+ * （两端共用一段会话，引擎的转写里本来也包含本窗口发的内容）。
+ */
+const remoteOnly = computed(() => {
+  const seen = new Set(turns.value.map((t) => `${t.role}\u0000${t.content}`))
+  return remoteTurns.value.filter((t) => !seen.has(`${t.role}\u0000${t.content}`))
+})
 
 async function refresh() {
   try {
@@ -212,6 +228,25 @@ async function restoreHistory() {
     if (turns.value.length) scrollToEnd()
   } catch {
     // 读不出来就当第一次见面，不阻断启动
+  }
+}
+
+/**
+ * 另一端说过的话（手机 QQ 那侧）。
+ *
+ * 从 2026-11-23 起两端共用一段会话，所以引擎那边其实什么都有；只是本窗口的
+ * chat-history.json 只记这里发出去的话。这里把引擎的另一些话取回来**显示**，
+ * 不参与上下文——上下文还是本地 turns，引擎自己也记着，重复发只会白烧 token。
+ */
+async function restoreRemote() {
+  try {
+    const list = await window.shellApi.loadRemoteChat()
+    if (!Array.isArray(list)) return
+    remoteTurns.value = list
+      .filter((t) => (t.role === 'user' || t.role === 'assistant') && typeof t.content === 'string' && t.content.length > 0)
+      .map((t) => ({ role: t.role, content: t.content, ts: t.ts }))
+  } catch {
+    // 读不到就不显示这一块，不打扰
   }
 }
 
@@ -555,14 +590,18 @@ onMounted(async () => {
   })
   await refresh()
   await restoreHistory()
+  await restoreRemote()
   await refreshProfile()
   await loadSavedModel()
   // 兜底轮询：IPC 事件丢了也不至于界面永远停在旧状态
   timer = window.setInterval(refresh, 3000)
+  // 手机上说的话不会推事件过来，只能定期拉一次
+  remoteTimer = window.setInterval(restoreRemote, 20000)
 })
 
 onBeforeUnmount(() => {
   if (timer) window.clearInterval(timer)
+  if (remoteTimer) window.clearInterval(remoteTimer)
   window.clearTimeout(flash._t)
 })
 </script>
@@ -724,6 +763,30 @@ onBeforeUnmount(() => {
                 </template>
               </div>
             </div>
+          </template>
+
+          <!--
+            手机那侧说过的话。两端共用一段会话，但本窗口只记自己发出去的，
+            所以这块从引擎的转写里补。只显示，不进上下文，也没有「更正」——
+            更正改的是本地那份，对别处发生的对话没有意义。
+          -->
+          <template v-if="remoteOnly.length">
+            <div class="hx-day">手机上聊的</div>
+            <template v-for="(turn, i) in remoteOnly" :key="'remote-' + i">
+              <div v-if="turn.role === 'user'" class="msg me">
+                <div class="content">
+                  <div class="bubble">{{ turn.content }}</div>
+                </div>
+              </div>
+              <div v-else class="msg">
+                <div class="avatar">
+                  <img :src="LOGO" alt="馄饨" draggable="false" />
+                </div>
+                <div class="content hx-reply">
+                  <p>{{ turn.content }}</p>
+                </div>
+              </div>
+            </template>
           </template>
 
           <div v-if="chatError" class="notice bad">{{ chatError }}</div>

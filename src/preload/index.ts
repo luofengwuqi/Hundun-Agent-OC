@@ -35,6 +35,13 @@ export interface ChatTurnDto {
   content: string;
 }
 
+/** 引擎转写里的一条消息：比本地多一个时间戳，界面可以据此显示先后。 */
+export interface RemoteTurnDto {
+  role: "user" | "assistant";
+  content: string;
+  ts: number;
+}
+
 export type ChatResult =
   | { ok: true; text: string }
   | {
@@ -108,6 +115,11 @@ export interface ShellApi {
   abortChat(): void;
   /** 回读上次的对话；session key 对不上（重置过记忆）时返回空。 */
   loadChat(): Promise<ChatTurnDto[]>;
+  /**
+   * 另一端的对话（手机 QQ）。只用于显示：本窗口的 chat-history.json 只记自己发出去的话，
+   * 而两端共用一段会话，引擎的转写里才有全部。读不到就返回空。
+   */
+  loadRemoteChat(): Promise<RemoteTurnDto[]>;
   /** 落盘当前对话。加载/保存失败都不该阻断聊天，故只回 ok 与原因。 */
   saveChat(history: ChatTurnDto[]): Promise<ChatHistorySaveResult>;
   /** 更正一条它说过的话：只传序号与新正文，索引/旧原文由主进程按落盘历史核对。 */
@@ -155,6 +167,7 @@ const api: ShellApi = {
   sendChat: (history) => ipcRenderer.invoke("chat:send", history),
   abortChat: () => ipcRenderer.send("chat:abort"),
   loadChat: () => ipcRenderer.invoke("chat:load"),
+  loadRemoteChat: () => ipcRenderer.invoke("chat:remote"),
   saveChat: (history) => ipcRenderer.invoke("chat:save", history),
   correctChat: (index, content) => ipcRenderer.invoke("chat:correct", { index, content }),
   getProfile: () => ipcRenderer.invoke("profile:get"),

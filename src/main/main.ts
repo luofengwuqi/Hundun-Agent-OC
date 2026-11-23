@@ -21,6 +21,7 @@ import {
 import { readSecrets, writeSecrets } from "./engine/secrets";
 import { ChatError, streamChat, type ChatTurn } from "./engine/chat";
 import { correctAssistantTurn, loadChatHistory, saveChatHistory } from "./engine/chathistory";
+import { readRemoteTurns, type RemoteTurn } from "./engine/transcript";
 import {
   checkAssistantOrigin,
   rememberAssistantTurn,
@@ -90,19 +91,67 @@ let activeChat: AbortController | undefined;
  * 那是引擎的保留命名空间。其余字符随意。
  */
 const SESSION_FILE = "session.json";
-const SESSION_KEY = "hundun-main";
+/**
+ * 桌面窗口和 QQ 私聊**共用同一段会话**（2026-11-23 起）。
+ *
+ * 以前这里是 `hundun-main`：引擎会把它规范成 `agent:main:hundun-main`，而 QQ 那边
+ * 由 `session.dmScope = per-channel-peer` 落进 `agent:main:qqbot:direct:<openid>`，
+ * 于是「电脑上说过的」和「手机上说过的」是两段记忆——问它手机上的事，桌面上它不知道。
+ *
+ * 现在两侧都写到 `agent:main:main`（引擎的标准主会话键，见 `buildAgentMainSessionKey`）。
+ * 配套改动：`openclaw.json` 的 `session.dmScope` 改成 `main`，模型名改成 `openclaw/main`
+ * （多 agent 下 `openclaw/default` 会被拒：`Multiple agents are configured …`）。
+ *
+ * 为什么必须带 `agent:` 前缀：实测（2026-11-23）不带前缀的键会让引擎在组装上下文时
+ * 走到内部错误分支（流里回 `internal error`），带前缀才正常应答。
+ */
+const SESSION_KEY = "agent:main:main";
+/** 引擎的完整会话键都带这个前缀；只认它，别的当作「上一个人留下的」。 */
+const SESSION_KEY_PREFIX = "agent:";
 
 async function readSessionKey(dataDir: string): Promise<string> {
   try {
     const raw = await readFile(join(dataDir, SESSION_FILE), "utf8");
     const parsed = JSON.parse(raw) as { sessionKey?: unknown };
-    if (typeof parsed.sessionKey === "string" && parsed.sessionKey.trim().length > 0) {
-      return parsed.sessionKey.trim();
+    if (typeof parsed.sessionKey === "string") {
+      const stored = parsed.sessionKey.trim();
+      // 旧版本存的是 `hundun-main` / `hundun-<uuid>`，没有 `agent:` 前缀。
+      // 它们在引擎里是另一段会话，继续用就等于「换了个屋子」，所以一律不用。
+      if (stored.startsWith(SESSION_KEY_PREFIX)) return stored;
     }
   } catch {
     // 第一次运行、或文件坏了：用默认 key。坏了不该阻断对话。
   }
   return SESSION_KEY;
+}
+
+/**
+ * 「从什么时候开始同步另一端的消息」。
+ *
+ * 两端共用一段会话是 2026-11-23 才做的，之前那段 QQ 会话（`agent:main:qqbot:direct:…`）
+ * **不迁过来**（用户明确「不迁，新会话开始」）。换键之后本该是干净的一段，但同一段会话里
+ * 可能已经有开发期测试留下的几句话——那不是用户说的，不该出现在对话里。
+ * 所以第一次用到这个功能时记一个时间点，只显示这之后的消息。
+ * 文件放 dataDir：它是界面行为，不是记忆，卸载可删。
+ */
+const REMOTE_SINCE_FILE = "remote-sync.json";
+
+async function remoteSince(dataDir: string): Promise<number> {
+  const file = join(dataDir, REMOTE_SINCE_FILE);
+  try {
+    const raw = await readFile(file, "utf8");
+    const parsed = JSON.parse(raw) as { since?: unknown };
+    if (typeof parsed.since === "number" && Number.isFinite(parsed.since)) return parsed.since;
+  } catch {
+    // 没有这个文件：说明是第一次，下面写一个
+  }
+  const now = Date.now();
+  try {
+    await writeFile(file, `${JSON.stringify({ since: now }, null, 2)}\n`, { mode: 0o600 });
+  } catch {
+    // 写不进去就本次按 now 过滤，下次再试
+  }
+  return now;
 }
 /** 收尾期间窗口正在销毁，此时再往渲染进程发消息只会刷一屏 "Render frame was disposed"。 */
 let shuttingDown = false;
@@ -441,6 +490,24 @@ function registerIpc(): void {
     if (!paths) return { ok: false, error: "paths 尚未初始化" };
     const sessionKey = await readSessionKey(paths.dataDir);
     return saveChatHistory(paths, sessionKey, history);
+  });
+
+  /**
+   * 另一端说过的话（手机 QQ 那侧）。
+   *
+   * 和 `chat:load` 是两条线：那条给「本窗口的上下文」，这条给「别处发生了什么」。
+   * 只读引擎的转写，不参与上下文组装、不写任何文件（D013）。
+   * 读不到就返回空——界面上少一块，而不是报错。
+   */
+  ipcMain.handle("chat:remote", async (): Promise<RemoteTurn[]> => {
+    if (!paths) return [];
+    try {
+      const sessionKey = await readSessionKey(paths.dataDir);
+      const since = await remoteSince(paths.dataDir);
+      return readRemoteTurns(paths, sessionKey).filter((turn) => turn.ts >= since);
+    } catch {
+      return [];
+    }
   });
 
   /**

@@ -263,3 +263,61 @@
   - 遗留的小瑕疵：同一会话里还留着 11-22 16:20 那条走错屋子的回答，所以这次它顺嘴编了一句「上次还问过你该叫什么名字，看来你已经给它起好了」——它在**给自己的上一次故障找解释**。记忆没断，但那一轮的记录是脏的。会话只有 4 句话，要清可以清；不清也不影响后续。
 - ~~**辅助模型 404（§7.18）**~~ **已改配置，未验效果**：`agents.defaults.utilityModel = "anthropic/deepseek-v4-1-flash"`（放 `defaults` 而不是 `main`，将来 `qq-*` 一起受益）。语义依引擎源码 `utility-model-DOwPP7zp.mjs` 的 `readUtilityModelSetting`：不写 = `auto`（按插件清单派生，`claude-haiku-5-5` 即由此而来）、空串 = `disabled`、非空 = `explicit`。`config validate` 通过。**未验**：404 是否真的消失——引擎日志不进磁盘（只在应用的日志面板环里），要等下一次辅助调用时在面板里看。
 
+
+---
+
+## 10. 多端一致：电脑与手机的聊天记录（2026-11-23）
+
+用户提出的场景：在电脑上说一句、再在手机上说一句，两个端显示的记录不一样。问能不能自动同步。
+
+### 10.1 先划清「不可能」的那一半
+
+QQ 客户端只显示**真实收发的 QQ 消息**。电脑上说的话没有经过 QQ，手机端就永远显示不出来——这是腾讯客户端的边界，不是我们能改的。可做的只有两件：**记忆合一** 与 **桌面端显示全部**。
+
+### 10.2 原来为什么不一样（三层分离，非 bug）
+
+1. **引擎层**：两端是两段会话。桌面端用 `hundun-main`（`src/main/main.ts` 的常量，经 `x-openclaw-session-key` 头传入），QQ 用 `agent:main:qqbot:direct:<openid>`——后者由 `session.dmScope = per-channel-peer` 决定（源码 `dist/session-key-CSDERtm3.mjs` 的 `buildAgentPeerSessionKey`）。
+2. **桌面层**：界面渲染的是应用自己写的 `chat-history.json`，不是引擎的转写，所以连引擎里 QQ 那段都看不见。
+3. **手机层**：见 §10.1。
+
+### 10.3 改法
+
+- `openclaw.json`：`session.dmScope` 从 `per-channel-peer` 改成 `main`。源码里 `dmScope === "main"` 分支返回 `buildAgentMainSessionKey({agentId, mainKey})`，即 `agent:<id>:<mainKey>`（`mainKey` 默认 `main`）。于是 QQ 私聊落进 `agent:main:main`。
+- 应用：`SESSION_KEY` 改成 `agent:main:main`；`readSessionKey` 只认 `agent:` 开头的键，旧值（`hundun-main` / `hundun-<uuid>`）一律不用——它们在引擎里是别的会话，继续用等于「换了个屋子」。重置记忆生成的新键同步改成 `agent:main:hundun-<uuid>`。
+- 不迁旧记录（用户明确）。旧会话原样留着，只是不再被引用。
+
+### 10.4 顺带修掉的一个真 bug（重要）
+
+**桌面端聊天自 2026-11-22 建 `qq-gate` 之后就是坏的。** 请求里写 `model: "openclaw/default"`、不带 agent 头：单 agent 时能过，多 agent 时引擎直接拒——
+
+```
+Multiple agents are configured, but this operation has no explicit owner.
+```
+
+证据：`session_nodes` 里 `hundun-*` 会话最后一次更新停在 **2026-11-19 17:28**，之后没有任何成功的桌面会话；`chat-history.json` 的 `savedAt` 也是 11-19。改成 `model: "openclaw/main"` 后恢复。
+
+顺带记下另一个坑：`x-openclaw-session-key` 必须带 `agent:` 前缀。不带前缀（如 `synctest-a`）时引擎先回 `Multiple agents…`（若有 agent 头则回 `internal error`），带前缀才正常应答。
+
+### 10.5 桌面端显示另一端
+
+新增 `src/main/engine/transcript.ts`：以 `node:sqlite` 只读打开 `state/agents/<agent>/agent/openclaw-agent.sqlite`，按 `session_nodes.session_key → current_session_id` 取 `transcript_events` 里 `message_role IN ('user','assistant')` 的行，拼成 `{role, content, ts}`。三处必须处理：
+
+- **压缩存储**：大事件在 `event_zstd` 里（`event_json` 为空），直接跳过，不引 zstd 依赖。
+- **包装消息**：桌面端每次发全量历史，引擎把它包成一条 user 消息（`[Chat messages since your last reply - for context] … [Current message - respond to this] User: 正文`）。只取 `[Current message]` 之后那段，否则既难看又和本地历史重复。
+- **assistant 的 content 是块数组**，含 `thinking` / `tool_use`，只拼 `type === "text"`。
+
+界面（`App.vue`）把结果放在本地对话之后，标题「手机上聊的」，**只显示不参与上下文**：上下文仍由本地 `turns` 提供，引擎自己也有同一段会话，重复发只会白烧 token。与本地历史重叠的按 `${role}\0${content}` 去重。每 20 秒拉一次（手机上说的话不会推事件过来）。
+
+另有 `dataDir/remote-sync.json` 的水位线 `since`：第一次用到这个功能时记下当前时间，只显示之后的远端消息。理由是「不迁旧记录」——开发期在同一段会话里试出来的几句话不该出现在用户的对话里。
+
+### 10.6 实测事实（决定实现方式的那几条）
+
+1. **会话自带历史会参与上下文**：只发最后一条 user（不带历史），它仍能答出前面说过的内容（先排除记忆文件的干扰再验的）。→ 共用会话键＝记忆真的合一。
+2. **桌面端发全量历史不会造成重复上下文**：R1 只发一条、R2 发「全量 + 新一条」、R3 问「把你能看到的用户消息列出来」，它只列出 3 条，没有重复。→ 发送路径不用改，兜底逻辑交给引擎。
+3. `model` 只接受 `openclaw` 或 `openclaw/<agentId>`，写具体模型名会被拒：`Invalid \`model\`. Use \`openclaw\` or \`openclaw/<agentId>\`.` → 这也是为什么桌面端只能通过模型名指 agent。
+
+### 10.7 未验 / 待办
+
+- **界面渲染没有肉眼验证**：本机 CDP 调试端口（19222）能连但不回包，`dev-shot.mjs` 拿不到截图。已验的是：构建通过、打包产物里 `hx-day` 出现 2 次（新增块）、`loadRemoteChat` 存在、`readRemoteTurns` 用真实库跑出正确结果（含时间戳、空会话返回空）。
+- 手机发一句 → 桌面 20 秒内应出现「手机上聊的」一块。**这一步要用户配合才能验。**
+- 两端同时说话时的排队行为未测。

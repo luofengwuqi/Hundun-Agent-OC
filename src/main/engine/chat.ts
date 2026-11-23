@@ -68,7 +68,12 @@ export async function streamChat(options: ChatOptions): Promise<string> {
         "x-openclaw-session-key": options.sessionKey,
       },
       body: JSON.stringify({
-        model: "openclaw/default",
+        // 必须是 `openclaw` 或 `openclaw/<agentId>`，别的写法引擎直接拒：
+        //   `Invalid `model`. Use `openclaw` or `openclaw/<agentId>`.`
+        // 用 `openclaw/default` 在「只有一个 agent」时能过，但 2026-11-22 加了 qq-gate
+        // 之后变成多 agent，实测就报 `Multiple agents are configured, but this
+        // operation has no explicit owner`——桌面端聊天当场全废。指到 main 才稳。
+        model: "openclaw/main",
         messages: options.messages,
         stream: true,
       }),
