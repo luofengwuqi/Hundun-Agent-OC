@@ -47,6 +47,12 @@
 2. **朋友之间互不可见**。一人一个 agent = 独立 workspace + 独立 SQLite（已核实：`docs/concepts/multi-agent.md`「What is one agent」）。
 3. **兜底必须指向门房，不能指向 `main`**。否则一次漏配就是「陌生人直接跟馄饨说话，并写进用户的记忆」。
 
+> **关于「只有一个会话」（2026-11-24 用户口径）**：`session.dmScope = "main"` 落地的是「**一个 agent 一个会话**」，键为 `agent:<agentId>:<mainKey>`（源码 `buildAgentMainSessionKey({agentId, mainKey})`，`agentId` 来自 binding 路由，不是一个全局值）。所以芜柒的桌面应用和芜柒自己的 QQ 私聊共用 `agent:main:main`——这就是用户说的「不管在哪都只有一个会话」。
+>
+> 将来真批了朋友，他的消息按 binding 路由到 `qq-<id>`，会话是 `agent:qq-<id>:main`，**不会和馄饨那段混**；门房 `qq-gate` 同理。隔离靠的是 agent 边界，不是 dmScope。
+>
+> **开群之前必须先改这个键**：`dmScope=main` 会把群消息也并进该 agent 的主会话。现在之所以没事，是因为 `channels.qqbot.groupPolicy: "disabled"` 整渠道关着——用户 2026-11-24 明确「先不管群聊多人的事情」。哪天要开群，得先把 dmScope 改回按 peer 分（`per-channel-peer` 之类），不能直接开。
+
 ---
 
 ## 3. 准入流程
@@ -285,6 +291,7 @@ QQ 客户端只显示**真实收发的 QQ 消息**。电脑上说的话没有经
 - `openclaw.json`：`session.dmScope` 从 `per-channel-peer` 改成 `main`。源码里 `dmScope === "main"` 分支返回 `buildAgentMainSessionKey({agentId, mainKey})`，即 `agent:<id>:<mainKey>`（`mainKey` 默认 `main`）。于是 QQ 私聊落进 `agent:main:main`。
 - 应用：`SESSION_KEY` 改成 `agent:main:main`；`readSessionKey` 只认 `agent:` 开头的键，旧值（`hundun-main` / `hundun-<uuid>`）一律不用——它们在引擎里是别的会话，继续用等于「换了个屋子」。重置记忆生成的新键同步改成 `agent:main:hundun-<uuid>`。
 - 不迁旧记录（用户明确）。旧会话原样留着，只是不再被引用。
+  - **2026-11-24 补记**：这句当时只想着引擎侧，没想到它会顺手把**桌面上的旧对话**也一起藏起来。`chat-history.json` 里存的 `sessionKey` 是 `hundun-7c6e6a37-…`，而 `loadChatHistory` 有一道「文件里的 key ≠ 当前 key 就整份作废」的守卫——那道守卫是为「重置记忆会换 key」（D029）写的，改 key 之后它把 11-19 那段判成了「上一个人的」，界面就空了。处理见 §10.8。
 
 ### 10.4 顺带修掉的一个真 bug（重要）
 
@@ -443,6 +450,40 @@ suppressing channel/provider account auto-start.
 顺带说明为什么第 1 次重拉时没有补启动日志：那时通道还没被压住，自己就起来了，`running` 已是 `true`，壳不去碰它——这也顺带证明「正在跑的一律不动」这条生效。
 
 **仍未覆盖**：用户在断路器窗口内**手动关掉再打开应用**（不是壳发起的重启），通道依然会被压住，壳按本决策不做补启动。遇到时的临时办法是点界面上的「重启引擎」——那算壳发起的重启，会补。
+
+
+---
+
+## 12. 桌面看不见旧对话（2026-11-24）
+
+用户看手机通了，但发现桌面只显示「手机上聊的」，上面一片空白，问之前的聊天记录去哪了。
+
+### 12.1 记录一条没丢，是三道门各挡了一截
+
+| 在哪 | 有多少 | 为什么看不见 |
+| --- | --- | --- |
+| `~/文档/馄饨Agent-OC/chat-history.json` | 20 轮，11-19 17:28 | `sessionKey` 还是 `hundun-7c6e6a37-…`，与当前 `agent:main:main` 对不上，`loadChatHistory` 整份作废 |
+| 引擎 `agent:main:hundun-7c6e6a37-…` | 55 条事件 / 30 条对话，11-19 17:09–17:28 | 是**另一个会话键**，「手机上聊的」只读当前键，读不到 |
+| 引擎 `agent:main:main` | 27 条事件 / 11 条对话，11-23 20:08 → 11-24 12:59 | 11-23 20:55 之前那两条测试消息（「收到」「通了」）被 `remote-sync.json` 的水位线挡住——D037 定「不迁旧记录」时故意加的 |
+
+第一道是最容易看漏的：**`loadChatHistory` 的 key 守卫本来是为「重置记忆换 key」（D029）写的**，D037 把键从 `hundun-*` 迁到 `agent:main:main` 之后，它把旧历史当成了「上一个人的」，静默作废。文件还在、20 轮全在，只是不显示。
+
+### 12.2 用户选的处置：直接接上，也当上下文（D040）
+
+两个选项摆在用户面前（只显示不参与上下文 / 直接接上），选后者。
+
+做法：备份 `chat-history.json` 为 `chat-history.json.bak-2026-11-24`，然后把 `sessionKey` 改成 `agent:main:main`，原子写（临时文件 + rename，`0600`）。20 轮全过 `clean()`（都是非空 user/assistant），读回来就是 20 条。
+
+含义要说清楚：接上之后这 20 轮**会作为下一轮的上下文**发给模型（`send()` 带整份 turns），所以模型会看到「11-19 的对话 + 今天的对话」拼成一段。用户接受这个代价——换来的是它下次说话时手上有原话，而不只是记忆文件里的摘要。
+
+生效方式：`restoreHistory()` 只在渲染层挂载时跑一次，所以要让窗口重新加载。做法是关掉壳再开——引擎是壳的子进程，`kill -9` 父进程不会带走它，新壳用 `findAdoptableEngine` 接管（`/readyz` 仍 200），用户看不到「引擎重启」这一跳。
+
+### 12.3 没动的
+
+- 引擎里 `agent:main:hundun-7c6e6a37-…` 那个旧会话原样留着，没删、没合并。
+- `dataDir/session.json` 里还写着 `hundun-7c6e6a37-…`。`readSessionKey` 只认 `agent:` 开头的值，所以它现在是惰性的，不影响行为；留着当痕迹。
+- 水位线 `remote-sync.json` 没动——那两条测试消息仍然不显示，这是当时说好的。
+
 
 
 
