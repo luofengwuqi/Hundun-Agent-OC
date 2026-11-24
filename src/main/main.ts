@@ -106,6 +106,51 @@ let lastCrashNote: string | null = null;
  * 但不接在普通启动上——那等于壳长期替引擎判断该不该绕过它的断路器。
  */
 let pendingChannelRecovery = false;
+
+/**
+ * 接管的引擎要**自己探活**。
+ *
+ * 接管来的引擎不是这个壳的子进程（它是上一个壳留下的孤儿），所以没有 `exit` 事件——
+ * 它死了壳一点消息都收不到，界面上永远显示「已连接」。2026-11-24 13:09 就是这样：
+ * 窗口说引擎在，实际端口早就没人听了，QQ 发了消息没人回，而壳浑然不觉。
+ *
+ * 探 `/readyz`，连续几次不通就认为它没了：清掉运行时记录、按「壳自己发起的重启」
+ * 处理（顺带补通道），重新起一个真正归自己监护的引擎。
+ */
+const ADOPT_PROBE_MS = 10_000;
+const ADOPT_MISS_LIMIT = 2;
+let adoptedWatchTimer: NodeJS.Timeout | undefined;
+
+function stopAdoptWatch(): void {
+  if (adoptedWatchTimer) {
+    clearInterval(adoptedWatchTimer);
+    adoptedWatchTimer = undefined;
+  }
+}
+
+function watchAdoptedEngine(record: RuntimeRecord): void {
+  stopAdoptWatch();
+  let misses = 0;
+  adoptedWatchTimer = setInterval(() => {
+    void (async () => {
+      if (quitting) return;
+      if (await probeReady(record.port, 2_000)) {
+        misses = 0;
+        return;
+      }
+      misses += 1;
+      if (misses < ADOPT_MISS_LIMIT) return;
+      stopAdoptWatch();
+      try {
+        if (paths) await clearRuntimeRecord(paths.runtimeRecord);
+      } catch {
+        // 清不掉也要往下走：bootEngine 自己还会再判一次
+      }
+      pendingChannelRecovery = true;
+      void bootEngine();
+    })();
+  }, ADOPT_PROBE_MS);
+}
 /** 当前配置里的默认模型 ref（未配置时为 undefined）。 */
 let modelRef: string | undefined;
 /** 是否已有可选用的凭据。 */
@@ -418,6 +463,8 @@ async function appendEngineLog(file: string | undefined, lines: readonly string[
 
 async function bootEngine(): Promise<void> {
   if (!paths) return;
+  // 重新起引擎前先停掉对接管引擎的探活，否则它可能在启动过程中再触发一次
+  stopAdoptWatch();
   state = { ...emptyState(), status: "starting" };
   broadcast();
 
@@ -445,6 +492,8 @@ async function bootEngine(): Promise<void> {
       notice: "接上了上次没有正常关闭的陪伴引擎。",
     };
     broadcast();
+    // 它不是我们的子进程，没有 exit 事件，只能自己探活
+    watchAdoptedEngine(adoptable);
     return;
   }
   // 记录存在但探不通 → 是一次不干净的退出，清掉免得下次误判
@@ -1074,6 +1123,7 @@ app.on("before-quit", (event) => {
     clearTimeout(restartTimer);
     restartTimer = undefined;
   }
+  stopAdoptWatch();
   if (stableTimer) {
     clearTimeout(stableTimer);
     stableTimer = undefined;
@@ -1083,6 +1133,18 @@ app.on("before-quit", (event) => {
   quitting = true;
   void engine.stop().finally(() => {
     engine = undefined;
+    /*
+     * 这一句不能省。
+     *
+     * 关窗的事件处理器是「没有 forceQuit 就 preventDefault + 收进托盘」（D026），
+     * 而 `app.quit()` 的执行方式正是「关所有窗口」——不先置 forceQuit，这次 quit
+     * 会被自己刚写的那个处理器拦下来，进程永远退不掉：引擎已经停了，窗口还挂着，
+     * 变成一个没有引擎的空壳，且比「没退」更难发现。
+     *
+     * 2026-11-24 实测：对壳发 SIGTERM 后 12 秒未退出，引擎已停（`/readyz` 无响应），
+     * 进程状态仍是 Sl。托盘菜单的「退出」之所以没事，是因为它先置了 forceQuit。
+     */
+    forceQuit = true;
     app.quit();
   });
 });

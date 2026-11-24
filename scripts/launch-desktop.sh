@@ -153,10 +153,26 @@ MEM_DIR="$DOCS_DIR/馄饨Agent-OC"
 if [ -d "$MEM_DIR" ]; then info "记忆目录 $MEM_DIR"; else printf '%s[·]%s 记忆目录 %s（首次启动后生成）\n' "$C_DIM" "$C_0" "$MEM_DIR"; fi
 
 # ---------- 5. 已经在跑就别开第二个（会抢同一份 userData / 状态目录） ----------
-if pgrep -f "$PROJ/node_modules/electron/dist/electron" >/dev/null 2>&1; then
-  warn "馄饨Agent-OC 已经在运行了，不再开第二个窗口。"
-  warn "要重启：先关掉那个窗口，或 pkill -f '$PROJ/node_modules/electron/dist/electron'"
+# ⚠️ 这里不能用 `pgrep -f "<二进制路径>"` 一句话判完。
+# 主进程被强杀（kill -9）后，zygote / gpu / renderer 这些子进程会被 init 收养并继续
+# 命中那条模式——于是「明明没有窗口」也一律报「已经在运行」，而且越杀越乱。
+# 2026-11-24 连踩三次。判据改成「有没有一个**不带 --type=** 的主进程」：
+# 主进程的命令行是 `electron --no-sandbox <项目目录>`，子进程都带 `--type=xxx`。
+MAIN_PIDS="$(ps -eo pid,args | grep -F "electron --no-sandbox $PROJ" | grep -v -- "--type=" | grep -v grep | awk '{print $1}')"
+if [ -n "$MAIN_PIDS" ]; then
+  warn "馄饨Agent-OC 已经在运行了（主进程 $MAIN_PIDS），不再开第二个窗口。"
+  warn "要重启：先关掉那个窗口，或 kill $MAIN_PIDS"
   exit 0
+fi
+
+# 只剩子进程 → 上一次主进程没退干净。清掉再开，否则它们会一直占着 GPU/网络连接。
+ORPHANS="$(pgrep -x electron 2>/dev/null | while read -r p; do
+  grep -qa "hundun-agent-oc" "/proc/$p/cmdline" 2>/dev/null && echo "$p"
+done)"
+if [ -n "$ORPHANS" ]; then
+  warn "清掉上次没退干净的 electron 子进程：$(echo $ORPHANS | tr '\n' ' ')"
+  for p in $ORPHANS; do kill -9 "$p" 2>/dev/null || true; done
+  sleep 1
 fi
 
 # ---------- 6. 图形会话 ----------
